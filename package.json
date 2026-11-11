@@ -1,0 +1,29 @@
+{
+	"name": "omp-build-tracker",
+	"version": "0.1.0",
+	"description": "Live build tracker for omp: a system map of what is being built plus live updates from every agent working on it.",
+	"type": "module",
+	"license": "MIT",
+	"author": "NormalTechGuy",
+	"homepage": "https://github.com/NormalTechGuy/omp-build-tracker#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/NormalTechGuy/omp-build-tracker.git"
+	},
+	"bugs": {
+		"url": "https://github.com/NormalTechGuy/omp-build-tracker/issues"
+	},
+	"keywords": ["omp", "oh-my-pi", "omp-plugin", "agents", "dashboard", "build-tracker"],
+	"bin": {
+		"omp-tracker": "./src/cli.ts"
+	},
+	"files": ["src", "web", "skills", "cloudflare", "README.md", "LICENSE"],
+	"omp": {
+		"extensions": ["./src/extension.ts"]
+	},
+	"devDependencies": {
+		"@oh-my-pi/pi-coding-agent": "^18.18.5",
+		"@types/bun": "latest",
+		"typescript": "^5.9.0"
+	}
+}

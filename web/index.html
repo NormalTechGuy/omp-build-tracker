@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script>/* Mounted under a share path (/t-…): relative asset URLs need the trailing slash. */if(location.protocol!=='file:'&&!/\/$|\.html$/.test(location.pathname))location.replace(location.pathname+'/'+location.search+location.hash)</script>
+<title>build tracker</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+ <div class="ring" id="ring" role="img" aria-label="overall progress"></div>
+ <h1 id="h1"><b>project</b> build tracker</h1>
+ <div class="meta"><span class="live" id="livebox"><span class="dot" id="livedot"></span><span id="livetxt">connecting</span></span><span>updated <span id="upd">–</span></span><span id="gitmeta"></span><span id="sharemeta"></span></div>
+ <div class="headline" id="headline"></div>
+</header>
+<nav><div class="in" id="nav"><a href="#overview" class="act">Overview</a><a href="#map">Map</a><a href="#path">Critical path</a><a href="#chunks">Chunks</a><a href="#agents">Agents</a><a href="#prs">PRs</a><a href="#activity">Trends</a><a href="#feeds">Decisions</a><a href="#infra" id="nav-infra">Infrastructure</a><a href="#owner">Your items</a></div></nav>
+<main>
+<section class="view act" id="v-overview">
+ <div class="kpis" id="kpis"></div>
+ <div class="card"><h2>System map <small><a href="#map">open the map</a></small></h2><div id="mapmini"></div></div>
+ <div class="card"><h2>Testing now <small id="tnowsum"></small></h2><div class="tests tnl" id="tnowlist"></div></div>
+ <div class="grid g2">
+  <div class="card"><h2>Progress by area</h2><div id="areas"></div></div>
+  <div class="card"><h2>Next steps <small id="cpsrc"></small></h2><div class="cp" id="cpmini"></div></div>
+ </div>
+ <div class="grid g2">
+  <div class="card"><h2>Merges per hour <small id="mrgsrc">last 48 h, UTC</small></h2><div class="chartbox"><canvas id="c-merges"></canvas><div class="chartempty" id="e-merges" hidden>No git repository found.</div></div></div>
+  <div class="card"><h2>Agents <small id="agtot"></small></h2><div id="agstatus"></div></div>
+ </div>
+</section>
+<section class="view" id="v-map">
+ <div class="maplay">
+  <div class="card mapcard"><h2>System map <small id="mapsum"></small></h2><div class="mseg" id="mapseg" role="group" aria-label="Map view"><button type="button" data-view="now" class="on" aria-pressed="true">Now</button><button type="button" data-view="future" aria-pressed="false">Future state</button></div><div id="maplegend" style="margin:-2px 0 8px"></div><div class="mapbox" id="mapbox"></div><div class="note" id="mapnote" style="margin-top:8px"></div></div>
+  <div class="mapside"><div class="card mappanel" id="mappanel" hidden></div><div class="card"><h2>Tests now and recent <small id="testwin"></small></h2><div class="tests" id="testlist"></div></div></div>
+ </div>
+</section>
+<section class="view" id="v-path">
+ <div class="card"><h2>Critical path <small id="cpsrc2"></small></h2><div class="cp" id="cpfull"></div></div>
+ <div class="card"><h2>Timeline</h2><div class="legend"><span><i class="sw" style="background:#a6e22e"></i>done</span><span><i class="sw" style="background:#fd971f"></i>estimate</span><span><i class="sw" style="background:#f92672"></i>today</span></div><div class="gantt" id="gantt"></div></div>
+ <div class="card"><h2>Completed phases</h2><div id="donephases"></div></div>
+</section>
+<section class="view" id="v-chunks">
+ <div class="card desk"><h2>Issues per chunk</h2><div class="legend"><span><i class="sw" style="background:#a6e22e"></i>closed</span><span><i class="sw" style="background:#3a382c"></i>open</span></div><div style="position:relative;height:120px" id="chunkbox"><canvas id="c-chunks"></canvas></div></div>
+ <div class="card"><h2>Chunks <small>closed / total</small></h2><div class="note" style="margin:-6px 0 10px">Chunks come from forge milestones, tracker chunks and agents' todo phases. Issues close after acceptance, so they lag the code.</div><div class="clist" id="t-chunks"></div></div>
+</section>
+<section class="view" id="v-agents">
+ <div class="card"><h2>Agent mix</h2><div class="grid g3" id="agmix"></div></div>
+ <div class="card"><h2>All agents <small id="agcount"></small></h2>
+  <div class="filters"><select id="fa-eng"><option value="">All engines</option></select><select id="fa-kind"><option value="">All roles</option></select><select id="fa-st"><option value="">Any status</option><option>running</option><option>idle</option><option>closed</option><option>error</option></select><input id="fa-q" placeholder="Search name or focus"></div>
+  <div class="agrid" id="agentgrid"></div></div>
+</section>
+<section class="view" id="v-prs">
+ <div class="grid g2"><div class="card"><h2>Open PRs by age</h2><div class="chartbox s"><canvas id="c-prage"></canvas><div class="chartempty" id="e-prage" hidden></div></div></div><div class="card"><h2>Recent merges</h2><div class="feed inline" id="merges"></div></div></div>
+ <div class="card"><h2>Open pull requests <small id="prcount"></small></h2><div class="filters"><select id="fp-a"><option value="">All authors</option></select><select id="fp-d"><option value="">Drafts and ready</option><option value="0">Ready only</option><option value="1">Drafts only</option></select><select id="fp-s"><option value="n:-1">Newest first</option><option value="n:1">Oldest first</option><option value="title:1">Title A–Z</option></select><input id="fp-q" placeholder="Search title or branch"></div><div class="prs" id="t-prs"></div></div>
+</section>
+<section class="view" id="v-activity">
+ <div class="grid g2"><div class="card"><h2>Tracker posts per hour <small>last 24 h, UTC</small></h2><div class="chartbox"><canvas id="c-comments"></canvas></div></div><div class="card"><h2>Issues opened and closed per day <small id="isssrc"></small></h2><div class="chartbox"><canvas id="c-issues"></canvas><div class="chartempty" id="e-issues" hidden>No issues yet. Configure a forge or record issues on map nodes.</div></div></div></div>
+ <div class="grid g3"><div class="card"><h2>Overall %</h2><div class="chartbox s"><canvas id="h-pct"></canvas></div></div><div class="card"><h2>Open issues</h2><div class="chartbox s"><canvas id="h-iss"></canvas></div></div><div class="card"><h2>Merges in 24 h</h2><div class="chartbox s"><canvas id="h-mrg"></canvas></div></div></div>
+ <div class="note" style="margin-top:8px" id="histnote"></div>
+</section>
+<section class="view" id="v-feeds">
+ <div class="grid g2"><div class="card"><h2>Blockers <small id="blkwin"></small></h2><div class="feed" id="blockers"></div></div><div class="card"><h2>Decisions and owner directions</h2><div class="feed" id="decisions"></div></div></div>
+ <div class="card"><h2>Notes</h2><div class="feed" id="notes"></div></div>
+</section>
+<section class="view" id="v-infra">
+ <div class="grid g2"><div class="card"><h2 id="factstitle">Live</h2><div class="kv" id="live"></div></div><div class="card"><h2 id="rulestitle">Approvals in force</h2><div id="appr" style="font-size:13px;color:var(--dim);white-space:pre-wrap"></div></div></div>
+</section>
+<section class="view" id="v-owner">
+ <div class="grid g2"><div class="card"><h2>Waiting on you</h2><div class="list own" id="t-owner"></div></div><div class="card"><h2>Estimates</h2><div class="list" id="t-est"></div></div></div>
+</section>
+</main>
+<footer id="footer"></footer>
+<script src="vendor/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
