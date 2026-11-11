@@ -10,9 +10,10 @@ import { collectForge, collectGit, detectRepo } from "./collectors";
 import { applyOps, OP_TYPES, type Op } from "./ops";
 import { configureShare, renderStandaloneHtml, TrackerServer, type ShareAction } from "./server";
 import { buildSnapshot } from "./snapshot";
-import { findTrackerDir, nowIso, projectRoot, TrackerStore } from "./store";
+import { findTrackerDir, newId, nowIso, projectRoot, TrackerStore } from "./store";
 import { FUTURE_STATES, ISSUE_STATUSES, NODE_STATES, POST_KINDS, TEST_RESULTS, WORK_STATES, type AgentRecord, type TodoPhase } from "./types";
 import { summarize, type ViewSection } from "./view";
+import { CURATOR_ENV, curatorCommand, type CuratorAction } from "./curator";
 
 // One dashboard server per tracker directory per process, shared by the lead
 // session and its subagents (module state is shared across child sessions).
@@ -70,6 +71,18 @@ async function ensureServer(store: TrackerStore, log: (m: string) => void): Prom
 	}
 }
 
+const WORK_TOOLS: Record<string, true> = { edit: true, write: true, ast_edit: true };
+
+// Test, typecheck and lint commands whose outcome is posted as a test automatically.
+const TEST_COMMAND =
+	/(?:^|[\s;&|(])(?:(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?test\b|(?:bunx|npx|pnpm\s+exec)\s+(?:vitest|jest|playwright\s+test|tsc)\b|vitest\b|jest\b|pytest\b|python3?\s+-m\s+pytest\b|go\s+test\b|cargo\s+(?:test|nextest|clippy)\b|(?:\.\/)?gradlew?\s+test\b|mvn\s+(?:test|verify)\b|dotnet\s+test\b|rspec\b|phpunit\b|mix\s+test\b|ctest\b|(?:make|just)\s+test\b|tsc\s+(?:--noEmit|-p)\b|ruff\s+check\b|eslint\b|biome\s+(?:check|lint)\b)/;
+
+/** The test-like segment of a shell command, used as the test name; undefined if none. */
+function testName(command: string): string | undefined {
+	const part = command.split(/&&|\|\||;|\n/).find(p => TEST_COMMAND.test(` ${p}`));
+	return part ? clip(part.replace(/\s+2>&1.*$/, ""), 80) : undefined;
+}
+
 function openUrl(pi: ExtensionAPI, url: string): void {
 	const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
 	void pi.exec(cmd, [url]).catch(() => {});
@@ -88,6 +101,37 @@ export default function buildTracker(pi: ExtensionAPI): void {
 	const log = (m: string) => pi.logger.warn(m);
 
 	let isSub = false;
+	// The curator is an omp process the tracker server starts with this env var set.
+	const isCurator = process.env[CURATOR_ENV] === "1";
+	// Per-run bookkeeping for the end-of-run nudge (reset on each user prompt).
+	let workThisRun = 0;
+	let postedThisRun = false;
+	let nudgedThisRun = false;
+	// Test commands in flight, by tool call id.
+	const testCalls = new Map<string, { name: string; t: string }>();
+	let staleCache: { at: number; text: string } | undefined;
+
+	/** Lead-only hint when the map is missing or older than the code it describes. */
+	const mapHint = (st: TrackerStore): string => {
+		if (staleCache && Date.now() - staleCache.at < 5 * 60_000) return staleCache.text;
+		const state = st.readState();
+		let text = "";
+		if (!state.map.now.items.length) {
+			text =
+				"The tracker has no system map yet. Draw one early with a `map` op: boxes for the components this work builds or changes, containers for groups, edges for the main flows; then add probes and bindings so states keep themselves current.";
+		} else {
+			const since = state.mapUpdated ?? state.updated;
+			const ageH = (Date.now() - Date.parse(since)) / 3_600_000;
+			if (ageH >= 12) {
+				const r = Bun.spawnSync(["git", "rev-list", "--count", `--since=${since}`, "HEAD"], { cwd: projectRoot(st.dir), stdout: "pipe", stderr: "ignore" });
+				const commits = r.exitCode === 0 ? Number(r.stdout.toString().trim()) : 0;
+				if (commits >= 5)
+					text = `The tracker map was last changed ${ageH < 48 ? `${Math.round(ageH)} h` : `${Math.round(ageH / 24)} days`} ago and ${commits} commits have landed since. Check it still matches the code (new, removed or renamed components; containers that changed) and fix it with a \`map\` op if not.`;
+			}
+		}
+		staleCache = { at: Date.now(), text };
+		return text;
+	};
 
 	const baseRecord = (ctx: ExtensionContext): AgentRecord => {
 		const header = ctx.sessionManager.getHeader();
@@ -97,12 +141,12 @@ export default function buildTracker(pi: ExtensionAPI): void {
 		const sub = isSub && file ? path.basename(file, ".jsonl") : undefined;
 		return {
 			id: agentId,
-			name: sub ?? (isSub ? "subagent" : (ctx.sessionManager.getSessionName() ?? header?.title ?? `lead · ${path.basename(ctx.cwd)}`)),
+			name: isCurator ? "tracker curator" : (sub ?? (isSub ? "subagent" : (ctx.sessionManager.getSessionName() ?? header?.title ?? `lead · ${path.basename(ctx.cwd)}`))),
 			engine: engineOf(ctx.model?.provider, ctx.model?.id),
 			model: ctx.model?.id,
 			thinking: pi.getThinkingLevel() ?? undefined,
 			status: "idle",
-			kind: isSub ? "subagent" : "lead",
+			kind: isCurator ? "curator" : isSub ? "subagent" : "lead",
 			...(parent ? { parent } : {}),
 			pid: process.pid,
 			host: os.hostname(),
@@ -144,7 +188,7 @@ export default function buildTracker(pi: ExtensionAPI): void {
 		if (!isSub) liveLeads.add(agentId);
 		const existing = store.readAgent(agentId);
 		store.writeAgent({ ...baseRecord(ctx), ...(existing ?? {}), status: existing?.status === "running" ? "running" : "idle", pid: process.pid, updated: nowIso() });
-		if (!isSub && store.config().autostart) {
+		if (!isSub && !isCurator && store.config().autostart) {
 			try {
 				await ensureServer(store, log);
 			} catch (err) {
@@ -164,9 +208,12 @@ export default function buildTracker(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!store || event.reason !== "prompt") return;
+		workThisRun = 0;
+		postedThisRun = false;
+		nudgedThisRun = false;
 		const rec = store.readAgent(agentId);
 		const patch: Partial<AgentRecord> = { status: "running" };
-		if (!rec?.focus) patch.focus = clip(event.prompt, 400);
+		if (!rec?.focus && !isCurator) patch.focus = clip(event.prompt, 400);
 		if (isSub && rec?.kind === "subagent") {
 			const idx = spawned.findIndex(s => s.text && event.prompt.includes(s.text.slice(0, 200)));
 			if (idx >= 0) {
@@ -179,15 +226,17 @@ export default function buildTracker(pi: ExtensionAPI): void {
 		beat(ctx, patch, true);
 		const cfg = store.config();
 		// Take over serving when the process that ran the dashboard has exited.
-		if (!isSub && cfg.autostart && !servers.has(store.dir) && !store.readServer())
+		if (!isSub && !isCurator && cfg.autostart && !servers.has(store.dir) && !store.readServer())
 			await ensureServer(store, log).catch(err => log(`tracker: server failed to start: ${String(err)}`));
-		if (!cfg.promptHint) return;
+		if (!cfg.promptHint || isCurator) return;
 		const url = servers.get(store.dir)?.url ?? store.readServer()?.url;
+		const stale = isSub ? "" : mapHint(store);
 		const hint = [
 			"# Live build tracker",
-			`This project has a live build tracker${url ? ` (${url})` : ""} that the owner watches. Your session already reports status and tool activity automatically.`,
-			"Prefer deterministic sources over manual posts: give each box a `probe` (http URL, tcp host:port or shell cmd) and the server checks it on a schedule and sets the box live/blocked by itself; bind boxes to CI workflows (`node` op `ci`) and issue labels (`label`), and areas to milestones (`milestone`) or map containers (`map`). Then post by hand only what no check can see: tests you run yourself (result running, then pass/fail/stopped with why), issues you find, blockers, decisions, next steps and estimates. Keep text short and factual.",
+			`This project has a live build tracker${url ? ` (${url})` : ""} that the owner watches. Your session already reports status and tool activity automatically, and test/typecheck/lint commands you run in bash are posted as tests for you.`,
+			"Prefer deterministic sources over manual posts: give each box a `probe` (http URL, tcp host:port or shell cmd) and the server checks it on a schedule and sets the box live/blocked by itself; bind boxes to CI workflows (`node` op `ci`) and issue labels (`label`), and areas to milestones (`milestone`) or map containers (`map`). Then post by hand only what no check can see: box state changes, issues you find, blockers, decisions, next steps and estimates. Keep text short and factual.",
 			"Call `tracker_view` first to see map ids. Read skill://build-tracker for conventions.",
+			...(stale ? [stale] : []),
 		].join("\n");
 		return { systemPrompt: [...event.systemPrompt, hint] };
 	});
@@ -224,10 +273,60 @@ export default function buildTracker(pi: ExtensionAPI): void {
 		spawned.splice(0, Math.max(0, spawned.length - 200));
 	});
 	pi.on("tool_execution_start", async (event, ctx) => {
+		if (event.toolName === "tracker_update") postedThisRun = true;
 		if (event.toolName === "tracker_update" || event.toolName === "tracker_view") return;
+		const args = event.args && typeof event.args === "object" ? (event.args as Record<string, unknown>) : {};
+		if (WORK_TOOLS[event.toolName] || (event.toolName === "bash" && typeof args.command === "string" && /\bgit\s+(commit|merge|rebase|push)\b/.test(args.command)))
+			workThisRun++;
 		beat(ctx, { action: describeAction(event.toolName, event.args, event.intent), status: "running" });
+		if (!store || isCurator) return;
+		const cfg = store.config();
+		if (cfg.autoTests && event.toolName === "bash" && typeof args.command === "string") {
+			const name = testName(args.command);
+			if (name) testCalls.set(event.toolCallId, { name, t: nowIso() });
+		}
+		if (cfg.autoAsks && event.toolName === "ask") {
+			const question = clip(String(args.html ?? args.question ?? args.questions ?? "").replace(/<[^>]+>/g, " "), 300);
+			if (question) applyOps(store, [{ type: "owner_item", id: `ask-${event.toolCallId}`, key: "Answer", text: question }], agentId);
+		}
 	});
 	pi.on("tool_execution_end", async (event, ctx) => {
+		if (store && event.toolName === "ask" && !isCurator && store.config().autoAsks) {
+			const st = store;
+			st.mutateState(s => {
+				s.ownerItems = s.ownerItems.filter(o => o.id !== `ask-${event.toolCallId}`);
+			});
+		}
+		const test = testCalls.get(event.toolCallId);
+		if (test && store) {
+			testCalls.delete(event.toolCallId);
+			const result = event.result as { content?: unknown; details?: { exitCode?: number } } | undefined;
+			const text = textOf(result);
+			// A backgrounded job has no outcome yet; leave it out rather than guess.
+			if (!/Backgrounded as job/.test(text)) {
+				const failed = event.isError || (result?.details?.exitCode ?? 0) !== 0;
+				// Prefer lines that say what failed; drop omp's own shell notices.
+				const lines = text
+					.split("\n")
+					.map(l => l.trim())
+					.filter(l => l && !/^(Ran in a copy of|Command exited with|Wall time|\(no output)/.test(l));
+				const telling = lines.filter(l => /fail|error|expect|✗|assert|panic|exception/i.test(l));
+				const tail = (telling.length ? telling.slice(0, 2) : lines.slice(-3)).join(" · ");
+				store.appendEvents([
+					{
+						type: "test",
+						id: newId(),
+						t: nowIso(),
+						node: "",
+						name: test.name,
+						result: failed ? "fail" : "pass",
+						...(failed ? { why: [clip(tail || `exit ${result?.details?.exitCode ?? "non-zero"}`, 300)] } : {}),
+						lane: "auto",
+						agent: agentId,
+					},
+				]);
+			}
+		}
 		if (event.toolName !== "todo" || event.isError) return;
 		const details = (event.result as { details?: { phases?: unknown } } | undefined)?.details;
 		if (!Array.isArray(details?.phases)) return;
@@ -238,6 +337,17 @@ export default function buildTracker(pi: ExtensionAPI): void {
 				: [],
 		}));
 		beat(ctx, { todo }, true);
+	});
+	// End-of-run check (main session only; omp never fires this for subagents).
+	pi.on("session_stop", async event => {
+		if (!store || isCurator || event.stop_hook_active || nudgedThisRun) return;
+		if (!store.config().stopNudge || workThisRun === 0 || postedThisRun) return;
+		nudgedThisRun = true;
+		return {
+			continue: true,
+			additionalContext:
+				"Before you finish: this run changed the project but posted nothing to the live build tracker. If the change affects what the tracker shows, update it in one tracker_update call: box states and notes, map boxes for components added or removed, finished critical-path steps, blockers, decisions. Tests you ran in bash are already posted automatically; do not repost them, and do not post notes about routine edits. If nothing on the tracker is affected, make no tracker call and say so in one line.",
+		};
 	});
 	pi.on("session_shutdown", async (_e, ctx) => {
 		beat(ctx, { status: "closed" }, true);
@@ -453,7 +563,7 @@ export default function buildTracker(pi: ExtensionAPI): void {
 
 	// ---- /tracker command ----
 	pi.registerCommand("tracker", {
-		description: "Live build tracker: /tracker [init [title] | open | share [funnel|tailnet|off|rotate] | stop | export [file] | status]",
+		description: "Live build tracker: /tracker [init [title] | open | share [funnel|tailnet|off|rotate|cloudflare …] | curator [on [model]|off|run|status] | stop | export [file] | status]",
 		handler: async (args, ctx) => {
 			const [sub = "open", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			if (sub === "init") {
@@ -517,6 +627,15 @@ export default function buildTracker(pi: ExtensionAPI): void {
 				if (action !== "off" && !servers.has(dir) && !st.readServer()) await ensureServer(st, log);
 				const status = await configureShare(st, action, servers.get(dir));
 				ctx.ui.notify(status.error ? `Sharing failed: ${status.error}` : shareLine(status), status.error ? "warning" : "info");
+			} else if (sub === "curator") {
+				const action = (rest[0] ?? "status") as CuratorAction;
+				if (!["on", "off", "run", "status"].includes(action)) {
+					ctx.ui.notify("Usage: /tracker curator [on [model] | off | run | status]", "warning");
+					return;
+				}
+				if (action === "run") ctx.ui.notify("Running the tracker curator…", "info");
+				const r = await curatorCommand(st, action, rest[1]);
+				ctx.ui.notify(r.text, r.ok ? "info" : "warning");
 			} else if (sub === "stop") {
 				const srv = servers.get(dir);
 				if (srv) {
@@ -538,7 +657,7 @@ export default function buildTracker(pi: ExtensionAPI): void {
 			} else if (sub === "status") {
 				const url = servers.get(dir)?.url ?? st.readServer()?.url;
 				ctx.ui.notify(summarize(buildSnapshot(st, undefined, undefined), "summary", url), "info");
-			} else ctx.ui.notify("Usage: /tracker [init [title] | open | share [funnel|tailnet|off|rotate] | stop | export [file] | status]", "warning");
+			} else ctx.ui.notify("Usage: /tracker [init [title] | open | share … | curator … | stop | export [file] | status]", "warning");
 		},
 	});
 }

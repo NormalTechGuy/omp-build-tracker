@@ -9,6 +9,7 @@ import { buildSnapshot, historyPoint, type Snapshot } from "./snapshot";
 import { nowIso, projectRoot, type TrackerStore } from "./store";
 import { CloudflarePusher } from "./cloudflare";
 import { Prober } from "./probes";
+import { CuratorScheduler } from "./curator";
 import { AGENT_STATUSES, type AgentRecord, type CloudflareStatus, type ShareConfig, type ShareStatus } from "./types";
 
 const WEB_DIR = path.join(import.meta.dir, "..", "web");
@@ -86,6 +87,7 @@ export class TrackerServer {
 	private shareSync: Promise<ShareStatus> = Promise.resolve(this.share);
 	private cloud: CloudflarePusher;
 	private prober: Prober;
+	private curator: CuratorScheduler;
 
 	constructor(store: TrackerStore, log: (msg: string) => void = () => {}) {
 		this.store = store;
@@ -93,6 +95,7 @@ export class TrackerServer {
 		this.log = log;
 		this.cloud = new CloudflarePusher(store, log, () => this.writeServerJson());
 		this.prober = new Prober(store, this.root, () => this.scheduleRebuild());
+		this.curator = new CuratorScheduler(store, log, () => this.scheduleRebuild());
 	}
 
 	async start(): Promise<string> {
@@ -119,7 +122,7 @@ export class TrackerServer {
 
 		const onChange = (_ev: string, file: string | Buffer | null) => {
 			const name = String(file ?? "");
-			if (name.endsWith(".tmp") || name.endsWith(".lock") || name === "server.json" || name === "history.jsonl" || name === "probes.json") return;
+			if (name.endsWith(".tmp") || name.endsWith(".lock") || ["server.json", "history.jsonl", "probes.json", "curator.json"].includes(name)) return;
 			if (name === "config.json") void this.syncShare();
 			this.scheduleRebuild();
 		};
@@ -150,6 +153,7 @@ export class TrackerServer {
 		});
 		every(20_000, () => this.rebuild()); // ages, stale agents, no-result tests
 		every(5_000, () => this.prober.tick()); // health checks, each on its own schedule
+		every(60_000, () => this.curator.tick()); // reconcile the tracker with all sessions' activity (opt-in)
 		every(60_000, () => this.recordHistory(false));
 		every(15_000, () => this.broadcastRaw(": keepalive\n\n"));
 		every(3_600_000, () => this.store.rotateEventsIfLarge());

@@ -7,6 +7,7 @@ import { collectForge, collectGit, detectRepo } from "./collectors";
 import { seedDemo } from "./demo";
 import { applyOps, OP_TYPES, type Op } from "./ops";
 import { cloudflareCommand, type CloudflareAction } from "./cloudflare";
+import { curatorCommand, type CuratorAction } from "./curator";
 import { configureShare, renderStandaloneHtml, TrackerServer, type ShareAction } from "./server";
 import { buildSnapshot } from "./snapshot";
 import { findTrackerDir, nowIso, projectRoot, TrackerStore } from "./store";
@@ -23,6 +24,7 @@ const USAGE = `omp-tracker — live build tracker for long-running agents
   omp-tracker post [--agent ID] OP_JSON...   apply ops (JSON objects or one JSON array; "-" reads stdin)
   omp-tracker agent --id ID [--name N] [--status running|idle|closed|error] [--now TEXT]
                     [--action TEXT] [--focus TEXT] [--engine E] [--model M] [--kind K] [--thinking L]
+  omp-tracker curator [on [MODEL]|off|run|status]   cheap agent that reconciles the tracker with all sessions' activity
   omp-tracker view [summary|map|tests|agents|path|feeds]
   omp-tracker export [FILE]                  write a self-contained HTML snapshot
   omp-tracker demo [DIR] [--repo owner/name] [--share funnel]   seed a demo tracker (default DIR /tmp/omp-tracker-demo) and serve it
@@ -102,6 +104,13 @@ async function main(): Promise<void> {
 		}
 		case "serve":
 			return serve(requireStore(), flags.open === true, flag(flags, "share"));
+		case "curator": {
+			const action = (pos[0] ?? "status") as CuratorAction;
+			if (!["on", "off", "run", "status"].includes(action)) throw new Error("usage: omp-tracker curator [on [model] | off | run | status]");
+			const r = await curatorCommand(requireStore(), action, pos[1]);
+			(r.ok ? console.log : console.error)(r.text);
+			process.exit(r.ok ? 0 : 1);
+		}
 		case "share": {
 			const store = requireStore();
 			const action = (pos[0] ?? "status") as ShareAction | "status" | "cloudflare";

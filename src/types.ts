@@ -225,6 +225,8 @@ export interface TrackerState {
 	chunks: Chunk[];
 	testNotes: Record<string, { why?: string; next?: string }>;
 	probes: Probe[];
+	/** Last time either map view changed (for the stale-map hint). */
+	mapUpdated?: string;
 	updated: string;
 }
 
@@ -304,6 +306,24 @@ export interface TrackerConfig {
 	promptHint: boolean;
 	share: ShareConfig;
 	cloudflare: CloudflareConfig;
+	curator: CuratorConfig;
+	/** Remind the lead agent to update the tracker when a run changed files but posted nothing. */
+	stopNudge: boolean;
+	/** Post test / typecheck / lint commands agents run in bash as tests automatically. */
+	autoTests: boolean;
+	/** Show questions agents ask you (ask tool) under "Waiting on you" while they wait. */
+	autoAsks: boolean;
+}
+
+export interface CuratorConfig {
+	/** Run a cheap omp agent that reconciles the tracker with what all sessions did. */
+	enabled: boolean;
+	/** Model selector or role for the curator (default "@smol"). */
+	model: string;
+	/** Minimum minutes between curator runs. */
+	minMinutes: number;
+	/** Command that starts omp (default: omp on PATH). */
+	command?: string;
 }
 
 export interface ShareConfig {

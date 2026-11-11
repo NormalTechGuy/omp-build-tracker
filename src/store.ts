@@ -65,6 +65,10 @@ export function defaultConfig(): TrackerConfig {
 		promptHint: true,
 		share: { mode: "off" },
 		cloudflare: { enabled: false, minIntervalSeconds: 5, heartbeatSeconds: 60 },
+		curator: { enabled: false, model: "@smol", minMinutes: 10 },
+		stopNudge: true,
+		autoTests: true,
+		autoAsks: true,
 	};
 }
 
@@ -149,6 +153,7 @@ export class TrackerStore {
 			windows: { ...base.windows, ...cfg.windows },
 			share: { ...base.share, ...cfg.share },
 			cloudflare: { ...base.cloudflare, ...cfg.cloudflare },
+			curator: { ...base.curator, ...cfg.curator },
 		};
 	}
 

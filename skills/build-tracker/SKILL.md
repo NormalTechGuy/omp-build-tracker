@@ -83,7 +83,7 @@ Never put secrets in probe commands or URLs; use environment variables or script
 | Moment | Op |
 |---|---|
 | A box changes state | `{"type":"node","id":"payments","state":"testing","note":"Load test at 400 rps"}` — states: live (done and working), testing, building, planned, blocked |
-| You start a test, check, benchmark, migration step | `{"type":"test","node":"payments","name":"failover drill","result":"running","lane":"WP-PAY","where":"staging"}` |
+| You start a long test, drill, benchmark or migration step that is not a plain bash test command (those post themselves) | `{"type":"test","node":"payments","name":"failover drill","result":"running","lane":"WP-PAY","where":"staging"}` |
 | It ends | same `node` + `name`, `result` pass / fail / stopped; on failure add `why` (list, most important first) and `next` |
 | You find a problem on a box | `{"type":"issue","node":"payments","what":"Webhook replay double-books refunds","status":"open","lane":"WP-PAY"}`; later `{"type":"issue","node":"payments","id":"<id>","status":"fixed","fix":"Dedup table"}` |
 | Something blocks you | `{"type":"post","kind":"blocker","text":"…"}` |
@@ -102,6 +102,18 @@ Rules:
 - Text is for the owner: short, factual, no jargon they did not use. Say what changed and what is next.
 - Never post secrets, tokens or credentials.
 - `live` means done and verified, not merely merged.
+
+## Already automatic — do not post these
+
+- Your status, model, assignment, last tool call, latest message and todo list.
+- Test, typecheck and lint commands you run in bash (`bun test`, `pytest`, `cargo test`, `tsc --noEmit`, `eslint`, …): posted as tests with their outcome.
+- Questions you ask the user with the `ask` tool: shown under "Waiting on you" until answered.
+- Probe results, CI runs on bound boxes, labeled issues, git merges.
+
+The lead may get an end-of-run reminder when it changed files but posted nothing, and a
+note when the map looks stale. Answer either with one tracker_update, or by saying
+nothing on the tracker is affected. A curator agent may also reconcile the tracker
+between runs; it is fine for it to adjust what you posted.
 
 ## Outside omp
 

@@ -265,6 +265,7 @@ export function applyOp(state: TrackerState, op: Op, agent: string | undefined):
 				}
 			}
 			checkMap(def);
+			state.mapUpdated = t;
 			note(`${view} map: ${def.items.length} items, ${def.edges.length} edges`);
 			break;
 		}

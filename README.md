@@ -100,8 +100,34 @@ wire them once (see the `build-tracker` skill):
 | `area` `milestone` / `map` binding | area % from a milestone, or from live boxes under a map container |
 | `headline: "auto"` | headline composed from the data |
 | Tailscale Funnel, Cloudflare | re-applied on server start; pushed on every change |
+| Test / typecheck / lint commands agents run in bash (`bun test`, `pytest`, `cargo test`, `tsc --noEmit`, `eslint`, …) | posted as tests with pass/fail and the failing lines (`autoTests`) |
+| Questions agents ask you (`ask` tool) | listed under "Waiting on you" until answered (`autoAsks`) |
 
 Probe results live in `.omp/tracker/probes.json`; flips are recorded in `events.jsonl`.
+
+### Keeping the map honest
+
+Box states can update themselves; the map's *structure* (which boxes exist)
+changes only when an agent posts it. Three things keep it from drifting:
+
+- **End-of-run nudge** (`stopNudge`, on by default): when the lead session is
+  about to finish a run that edited files or committed but posted nothing to the
+  tracker, it is asked once to update it (or say nothing is affected).
+- **Stale-map hint**: the lead's tracker note says when there is no map yet, or
+  when the map is 12 h+ old and 5+ commits have landed since.
+- **Curator** (opt-in): a cheap omp agent the tracker server runs after
+  activity, at most every `curator.minMinutes` (10). It reads a digest of what
+  every session did since its last run (agent status and todos, commits and
+  changed files, tracker posts) and reconciles the tracker: map boxes, states,
+  notes, critical path, areas, phases, blockers. It only has the tracker tools
+  plus read/grep/glob, never edits the project, and does nothing when there was
+  no activity.
+
+  ```
+  /tracker curator on [model]   default model: @smol (your fast role)
+  /tracker curator run          run once now
+  /tracker curator off | status
+  ```
 
 ## Share a link (Tailscale)
 
@@ -183,6 +209,10 @@ CLI: `omp-tracker share cloudflare [on|off|rotate|status]`. One-time setup: `npx
   "windows": { "testsHours": 6, "noResultHours": 3, "blockersHours": 6, "agentsHours": 48 },
   "autostart": true,
   "promptHint": true,
+  "stopNudge": true,
+  "autoTests": true,
+  "autoAsks": true,
+  "curator": { "enabled": false, "model": "@smol", "minMinutes": 10 },
   "share": { "mode": "funnel", "path": "/t-AbC…", "httpsPort": 443 }
 }
 ```
