@@ -35,6 +35,7 @@ const SYSTEM = [
 	"- node: move states (planned → building → testing → live; blocked when stuck) and refresh notes in one or two factual sentences. Leave boxes whose state comes from health checks alone.",
 	"- step / area / phase / estimate: keep the critical path current, mark finished steps done, record finished phases with dates.",
 	"- post: record blockers and decisions that appear in the activity and are not posted yet.",
+	"- custom tabs (tab_rows / tab_block): when the activity reports new results that a custom tab tracks (e.g. a new score for a leaderboard row), update those rows. Read the tab with tracker_view section tabs first. Do not create new tabs unless the run clearly lacks one for its central results.",
 	"Do not repeat posts that already exist, do not invent progress, and do not narrate. If nothing needs to change, make no calls and reply NOOP.",
 	"Finish with one short line describing what you changed.",
 ].join("\n");
@@ -115,6 +116,14 @@ function ompCommand(store: TrackerStore): string {
 	return store.config().curator.command ?? Bun.which("omp") ?? "omp";
 }
 
+/** Config overlay for curator runs: bookkeeping stays out of the user's long-term memory and learned skills. */
+function isolationOverlay(store: TrackerStore): string {
+	const file = path.join(store.dir, "curator.config.yml");
+	const body = "memory:\n  backend: off\nautolearn:\n  enabled: false\n";
+	if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== body) fs.writeFileSync(file, body);
+	return file;
+}
+
 /** Run the curator once. Returns its final reply (or the error). */
 export async function runCurator(store: TrackerStore, log: (m: string) => void = () => {}): Promise<{ ok: boolean; result: string }> {
 	const cfg = store.config().curator;
@@ -128,7 +137,24 @@ export async function runCurator(store: TrackerStore, log: (m: string) => void =
 	let result = "";
 	try {
 		const proc = Bun.spawn(
-			[ompCommand(store), "-p", "--no-session", "--model", cfg.model, "--thinking", "low", "--tools", CURATOR_TOOLS, "--append-system-prompt", SYSTEM, prompt],
+			[
+				ompCommand(store),
+				"-p",
+				"--no-session",
+				"--no-skills",
+				"--no-rules",
+				"--config",
+				isolationOverlay(store),
+				"--model",
+				cfg.model,
+				"--thinking",
+				"low",
+				"--tools",
+				CURATOR_TOOLS,
+				"--append-system-prompt",
+				SYSTEM,
+				prompt,
+			],
 			{ cwd: projectRoot(store.dir), stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, [CURATOR_ENV]: "1" } },
 		);
 		const timer = setTimeout(() => proc.kill(), RUN_TIMEOUT_MS);

@@ -129,6 +129,29 @@ changes only when an agent posts it. Three things keep it from drifting:
   /tracker curator off | status
   ```
 
+## Custom tabs
+
+Each run can add tabs of its own next to Overview: a leaderboard for a benchmark,
+a checklist for a migration, an experiment log for research. The setup agent
+designs them from typed blocks with the `tab` op; agents and the curator then
+keep them current, usually one row at a time with `tab_rows`.
+
+| Block | Shows |
+|---|---|
+| `table` | Sortable table. Column kinds: text, number, score (number + bar, best highlighted), pct, delta (+/− coloured), state, tokens. Optional rank column; row flags `_muted`, `_highlight`, `_unranked`, `_note`. |
+| `stats` | Big numbers with labels |
+| `kv` | Key → value list |
+| `list` | Items with a state (done / active / queued / fail …) |
+| `text` | Paragraphs and `- ` bullets |
+| `chart` | Bar, line or horizontal bar chart |
+
+`pin: true` also shows a block on the Overview; `half: true` sets two blocks side
+by side. Tabs show on share links unless `public: false`. See the
+`build-tracker` skill for a full leaderboard example.
+
+When the plugin's dashboard files change, a running tracker server redeploys
+the Cloudflare copy on its next start, so hosted links get new views too.
+
 ## Share a link (Tailscale)
 
 ```

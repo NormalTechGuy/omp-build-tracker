@@ -14,10 +14,11 @@
  <div class="meta"><span class="live" id="livebox"><span class="dot" id="livedot"></span><span id="livetxt">connecting</span></span><span>updated <span id="upd">–</span></span><span id="gitmeta"></span><span id="sharemeta"></span></div>
  <div class="headline" id="headline"></div>
 </header>
-<nav><div class="in" id="nav"><a href="#overview" class="act">Overview</a><a href="#map">Map</a><a href="#path">Critical path</a><a href="#chunks">Chunks</a><a href="#agents">Agents</a><a href="#prs">PRs</a><a href="#activity">Trends</a><a href="#feeds">Decisions</a><a href="#infra" id="nav-infra">Infrastructure</a><a href="#owner">Your items</a></div></nav>
+<nav><div class="in" id="nav"><a href="#overview" class="act">Overview</a><span id="navx"></span><a href="#map">Map</a><a href="#path">Critical path</a><a href="#chunks">Chunks</a><a href="#agents">Agents</a><a href="#prs">PRs</a><a href="#activity">Trends</a><a href="#feeds">Decisions</a><a href="#infra" id="nav-infra">Infrastructure</a><a href="#owner">Your items</a></div></nav>
 <main>
 <section class="view act" id="v-overview">
  <div class="kpis" id="kpis"></div>
+ <div class="xgrid" id="pinned"></div>
  <div class="card"><h2>System map <small><a href="#map">open the map</a></small></h2><div id="mapmini"></div></div>
  <div class="card"><h2>Testing now <small id="tnowsum"></small></h2><div class="tests tnl" id="tnowlist"></div></div>
  <div class="grid g2">
@@ -69,6 +70,7 @@
 <section class="view" id="v-owner">
  <div class="grid g2"><div class="card"><h2>Waiting on you</h2><div class="list own" id="t-owner"></div></div><div class="card"><h2>Estimates</h2><div class="list" id="t-est"></div></div></div>
 </section>
+<div id="xviews"></div>
 </main>
 <footer id="footer"></footer>
 <script src="vendor/chart.umd.min.js"></script>

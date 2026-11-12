@@ -105,9 +105,36 @@ export async function deployCloudflare(store: TrackerStore): Promise<CloudflareS
 	const url = out.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0];
 	if (!url) throw new CloudflareError(`Deployed, but could not find the workers.dev URL in wrangler output:\n${out.trim().slice(-600)}`);
 	await putSecrets(store, configFile, { SHARE_KEY: secrets.key, WRITE_TOKEN: secrets.token });
-	cfg.cloudflare = { ...cfg.cloudflare, enabled: true, name, url };
+	cfg.cloudflare = { ...store.config().cloudflare, enabled: true, name, url, assetsHash: assetsHash() };
 	store.saveConfig(cfg);
 	return { enabled: true, url: linkOf(url, secrets.key) };
+}
+
+/** Hash of what a deploy uploads (dashboard files + Worker). A different hash means the copy is out of date. */
+export function assetsHash(): string {
+	const h = new Bun.CryptoHasher("sha256");
+	const walk = (dir: string) => {
+		for (const name of fs.readdirSync(dir).sort()) {
+			const p = path.join(dir, name);
+			if (fs.statSync(p).isDirectory()) walk(p);
+			else h.update(name).update(fs.readFileSync(p));
+		}
+	};
+	walk(path.join(PLUGIN_ROOT, "web"));
+	h.update(fs.readFileSync(path.join(PLUGIN_ROOT, "cloudflare", "worker.js")));
+	return h.digest("hex").slice(0, 16);
+}
+
+/** Redeploy when the plugin's dashboard files changed since the last deploy (keeps the link and secrets). */
+export async function redeployIfStale(store: TrackerStore, log: (m: string) => void): Promise<void> {
+	const cfg = store.config().cloudflare;
+	if (!cfg.enabled || !cfg.name || !readSecrets(store) || cfg.assetsHash === assetsHash()) return;
+	try {
+		await deployCloudflare(store);
+		log("tracker: Cloudflare copy redeployed with the updated dashboard");
+	} catch (err) {
+		log(`tracker: Cloudflare redeploy failed: ${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
 /** New link key; the old link stops working as soon as the secret is updated. */

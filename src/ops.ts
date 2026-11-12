@@ -1,5 +1,6 @@
 // Tracker update operations: validation and application to state.
 import { newId, nowIso, type TrackerStore } from "./store";
+import { applyTab, applyTabBlock, applyTabRows, TabError } from "./tabs";
 import {
 	FUTURE_STATES,
 	ISSUE_STATUSES,
@@ -34,6 +35,9 @@ export const OP_TYPES = [
 	"test_note",
 	"agent",
 	"probe",
+	"tab",
+	"tab_block",
+	"tab_rows",
 ] as const;
 export type OpType = (typeof OP_TYPES)[number];
 
@@ -308,6 +312,7 @@ export function applyOp(state: TrackerState, op: Op, agent: string | undefined):
 				...(str(op, "next") ? { next: str(op, "next") } : {}),
 				...(str(op, "lane") ? { lane: str(op, "lane") } : {}),
 				...(str(op, "where") ? { where: str(op, "where") } : {}),
+				...(num(op, "timeout_h") !== undefined ? { timeoutHours: Math.max(0.25, Math.min(168, num(op, "timeout_h")!)) } : {}),
 				agent,
 			};
 			events.push(ev);
@@ -530,6 +535,18 @@ export function applyOp(state: TrackerState, op: Op, agent: string | undefined):
 			if (idx >= 0) state.probes[idx] = probe;
 			else state.probes.push(probe);
 			note(`probe ${name} on ${node}: ${kind} ${target} every ${probe.everySeconds}s${probe.drivesState ? ", drives box state" : ""}`);
+			break;
+		}
+		case "tab":
+		case "tab_block":
+		case "tab_rows": {
+			const fn = op.type === "tab" ? applyTab : op.type === "tab_block" ? applyTabBlock : applyTabRows;
+			try {
+				note(fn(state, op, t));
+			} catch (err) {
+				if (err instanceof TabError) throw new OpError(err.message.startsWith(`${op.type}:`) ? err.message : `${op.type}: ${err.message}`);
+				throw err;
+			}
 			break;
 		}
 		case "post": {

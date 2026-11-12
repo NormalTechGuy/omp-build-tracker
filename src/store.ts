@@ -52,6 +52,7 @@ export function emptyState(title: string): TrackerState {
 		chunks: [],
 		testNotes: {},
 		probes: [],
+		tabs: [],
 		updated: nowIso(),
 	};
 }
@@ -108,7 +109,7 @@ export class TrackerStore {
 			writeJsonAtomic(store.configPath, cfg);
 		}
 		const ignore = path.join(dir, ".gitignore");
-		if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, "agents/\nserver.json\ncloudflare/\n*.lock/\n*.tmp\n");
+		if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, "agents/\nserver.json\ncloudflare/\ncurator.json\ncurator.config.yml\nprobes.json\n*.lock/\n*.tmp\n");
 		return store;
 	}
 
@@ -164,7 +165,9 @@ export class TrackerStore {
 	readState(): TrackerState {
 		const s = readJson<TrackerState>(this.statePath);
 		if (!s) throw new Error(`Tracker state missing or unreadable: ${this.statePath}`);
-		s.probes ??= []; // state files from before probes existed
+		// State files from older versions lack these.
+		s.probes ??= [];
+		s.tabs ??= [];
 		return s;
 	}
 

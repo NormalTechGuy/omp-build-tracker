@@ -1,7 +1,7 @@
 // Compact text rendering of a snapshot for agents (tracker_view) and the CLI.
 import type { Snapshot } from "./snapshot";
 
-export type ViewSection = "summary" | "map" | "tests" | "agents" | "path" | "feeds";
+export type ViewSection = "summary" | "map" | "tests" | "agents" | "path" | "feeds" | "tabs";
 
 function ago(iso: string): string {
 	const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
@@ -79,6 +79,30 @@ function feedLines(s: Snapshot): string[] {
 	];
 }
 
+/** Custom tabs: brief lists ids and block shapes; full also prints table rows. */
+function tabLines(s: Snapshot, full: boolean): string[] {
+	const tabs = s.tabs ?? [];
+	if (!tabs.length) return ["custom tabs: none"];
+	const out = ["custom tabs:"];
+	for (const t of tabs) {
+		out.push(`  ${t.id} "${t.title}"${t.public ? "" : " (private)"} — updated ${ago(t.updated)}`);
+		for (const b of t.blocks) {
+			const shape =
+				b.kind === "table"
+					? `columns ${b.columns?.map(c => c.key).join(",")}; row_key ${b.rowKey ?? b.columns?.[0]?.key}; ${b.rows?.length ?? 0} rows`
+					: b.kind === "chart"
+						? `${b.chart} chart, ${b.series?.length ?? 0} series × ${b.labels?.length ?? 0}`
+						: b.kind === "text"
+							? `${b.text?.length ?? 0} chars`
+							: `${b.items?.length ?? 0} items`;
+			out.push(`    ${b.id} (${b.kind}${b.pin ? ", pinned" : ""}) ${b.title ? `"${b.title}" ` : ""}— ${shape}`);
+			if (full && b.kind === "table")
+				for (const r of (b.rows ?? []).slice(0, 40)) out.push(`      ${b.columns!.map(c => `${c.key}=${r[c.key] ?? ""}`).join(" | ")}`);
+		}
+	}
+	return out;
+}
+
 export function summarize(s: Snapshot, section: ViewSection, url?: string): string {
 	const head = [`${s.title} — ${s.overall_pct}% overall${url ? ` · dashboard ${url}` : ""}`, s.headline ? `headline: ${s.headline}` : "headline: (none)"];
 	switch (section) {
@@ -92,6 +116,8 @@ export function summarize(s: Snapshot, section: ViewSection, url?: string): stri
 			return [...head, ...pathLines(s)].join("\n");
 		case "feeds":
 			return [...head, ...feedLines(s)].join("\n");
+		case "tabs":
+			return [...head, ...tabLines(s, true)].join("\n");
 		default: {
 			const failing = s.tests.filter(t => (t.result === "fail" || t.result === "stopped") && !t.resolved);
 			return [
@@ -100,6 +126,7 @@ export function summarize(s: Snapshot, section: ViewSection, url?: string): stri
 				`testing now: ${s.testing_now.map(t => `${t.node || "-"}: ${t.what}`).join("; ") || "none"}`,
 				`unresolved failures: ${failing.map(t => `[${t.id}] ${t.name}`).join("; ") || "none"}`,
 				...pathLines(s),
+				...tabLines(s, false),
 				`blockers: ${s.blockers.map(b => b.text).join(" | ") || "none"}`,
 				`agents: ${s.agents.filter(a => a.status === "running").length} running / ${s.agents.length}`,
 			].join("\n");

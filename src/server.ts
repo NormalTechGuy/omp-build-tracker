@@ -7,7 +7,7 @@ import { applyOps, OP_TYPES, type Op } from "./ops";
 import { applyShare, newSharePath, redactDeep, removeShare, ShareError } from "./share";
 import { buildSnapshot, historyPoint, type Snapshot } from "./snapshot";
 import { nowIso, projectRoot, type TrackerStore } from "./store";
-import { CloudflarePusher } from "./cloudflare";
+import { CloudflarePusher, redeployIfStale } from "./cloudflare";
 import { Prober } from "./probes";
 import { CuratorScheduler } from "./curator";
 import { AGENT_STATUSES, type AgentRecord, type CloudflareStatus, type ShareConfig, type ShareStatus } from "./types";
@@ -29,6 +29,7 @@ export function publicView(s: Snapshot): Snapshot {
 	delete out.forge_error;
 	out.agents = out.agents.map(({ pid: _pid, host: _host, ...a }) => a);
 	delete out.cloudflare;
+	out.tabs = (out.tabs ?? []).filter(t => t.public);
 	// Keep shared payloads small: at most ~400 trend points.
 	if (out.history.length > 400) {
 		const step = out.history.length / 400;
@@ -119,6 +120,8 @@ export class TrackerServer {
 		this.rebuild();
 		this.recordHistory(true);
 		await this.syncShare();
+		// The hosted copy serves the dashboard files from its last deploy; bring them up to date in the background.
+		void redeployIfStale(this.store, this.log);
 
 		const onChange = (_ev: string, file: string | Buffer | null) => {
 			const name = String(file ?? "");
@@ -190,11 +193,13 @@ export class TrackerServer {
 		return this.cloud.status;
 	}
 
+	private readonly startedAt = nowIso();
+
 	private writeServerJson(): void {
 		if (!this.server) return; // stopped: never resurrect server.json
 		fs.writeFileSync(
 			this.store.serverPath,
-			JSON.stringify({ pid: process.pid, port: this.server?.port, url: this.url, started: nowIso(), share: this.share, cloudflare: this.cloud.status }),
+			JSON.stringify({ pid: process.pid, port: this.server?.port, url: this.url, started: this.startedAt, share: this.share, cloudflare: this.cloud.status }),
 		);
 	}
 

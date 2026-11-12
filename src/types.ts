@@ -23,6 +23,79 @@ export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 export const POST_KINDS = ["decision", "blocker", "note"] as const;
 export type PostKind = (typeof POST_KINDS)[number];
 
+export const BLOCK_KINDS = ["table", "stats", "kv", "list", "text", "chart"] as const;
+export type BlockKind = (typeof BLOCK_KINDS)[number];
+
+export const COLUMN_KINDS = ["text", "number", "score", "pct", "delta", "state", "tokens"] as const;
+export type ColumnKind = (typeof COLUMN_KINDS)[number];
+
+export interface TabColumn {
+	key: string;
+	label?: string;
+	/** text (default) · number · score (number with an inline bar) · pct (0–100) · delta (+/- coloured) · state (coloured word) · tokens (k/M) */
+	kind?: ColumnKind;
+	/** Digits after the decimal point for numeric kinds. */
+	digits?: number;
+	/** For score/delta: lower is better. */
+	lowerBetter?: boolean;
+}
+
+export interface TabItem {
+	label?: string;
+	value?: string | number;
+	sub?: string;
+	text?: string;
+	state?: string;
+}
+
+export interface TabSeries {
+	name: string;
+	values: (number | null)[];
+	color?: string;
+}
+
+export interface TabBlock {
+	id: string;
+	kind: BlockKind;
+	title?: string;
+	note?: string;
+	/** Also show this block on the Overview tab. */
+	pin?: boolean;
+	/** Half width on wide screens (two half blocks share a row). */
+	half?: boolean;
+	// table
+	columns?: TabColumn[];
+	rows?: Record<string, unknown>[];
+	/** Column whose value identifies a row for tab_rows upserts (default: first column). */
+	rowKey?: string;
+	sort?: string;
+	sortDir?: "asc" | "desc";
+	/** Add a rank column numbered by the current sort; rows with `_unranked: true` are skipped. */
+	rank?: boolean;
+	// stats / kv / list
+	items?: TabItem[];
+	// text
+	text?: string;
+	// chart
+	chart?: "bar" | "line" | "hbar";
+	labels?: string[];
+	series?: TabSeries[];
+	updated: string;
+}
+
+export interface CustomTab {
+	id: string;
+	title: string;
+	/** Short line under the tab title. */
+	note?: string;
+	/** Shown on share links and exports (default true). */
+	public: boolean;
+	/** Sort order among custom tabs (lower first). */
+	order: number;
+	blocks: TabBlock[];
+	updated: string;
+}
+
 export const AGENT_STATUSES = ["running", "idle", "closed", "error"] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
@@ -227,6 +300,8 @@ export interface TrackerState {
 	probes: Probe[];
 	/** Last time either map view changed (for the stale-map hint). */
 	mapUpdated?: string;
+	/** Run-specific tabs the agents design (leaderboard, results matrix, checklist, …). */
+	tabs: CustomTab[];
 	updated: string;
 }
 
@@ -244,6 +319,8 @@ export type TrackerEvent =
 			lane?: string;
 			where?: string;
 			agent?: string;
+			/** Hours a running test may take before it shows as "no result" (default windows.noResultHours). */
+			timeoutHours?: number;
 	  }
 	| { type: "post"; id: string; t: string; kind: PostKind; text: string; agent?: string }
 	| { type: "op"; id: string; t: string; summary: string; agent?: string };
@@ -279,6 +356,8 @@ export interface AgentRecord {
 	pid?: number;
 	host?: string;
 	todo?: TodoPhase[];
+	/** Curator: number of runs recorded on this card. */
+	runs?: number;
 	started: string;
 	updated: string;
 }
@@ -357,6 +436,8 @@ export interface CloudflareConfig {
 	minIntervalSeconds: number;
 	/** Push at least this often even without changes, so "updated" stays fresh. */
 	heartbeatSeconds: number;
+	/** Hash of the dashboard files last deployed; the server redeploys when it differs. */
+	assetsHash?: string;
 }
 
 export interface CloudflareStatus {

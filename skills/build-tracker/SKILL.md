@@ -49,6 +49,36 @@ Layout is automatic: containers wrap their children left to right and stack
 vertically on narrow screens. `break: true` starts a new row, `wide: true` takes
 the full width, `flow: "column"` stacks a container's children.
 
+## Custom tabs: design the view this run needs
+
+The standard tabs cover any project. When the run has its own central output, give it a
+tab of its own at setup. Pick what the owner will look at first; examples:
+
+- benchmark or model comparison → **leaderboard** table (ranked by score, tokens, cost) + score chart
+- migration → **checklist** list + per-service status table
+- research programme → **questions** list with answers so far + experiment log table
+- incident / launch → **timeline** list + KPI stats
+
+```json
+{"ops":[
+ {"type":"tab","id":"leaderboard","title":"Leaderboard","note":"Which architecture learns log fields best?","blocks":[
+  {"id":"top","kind":"stats","pin":true,"title":"Best so far","items":[{"label":"leader","value":"Specialised agent"},{"label":"score","value":0.781,"state":"pass"}]},
+  {"id":"board","kind":"table","title":"Development scoreboard","note":"Field score on ten sources; reference rows not ranked.",
+   "rank":true,"sort":"score","sort_dir":"desc","row_key":"arm",
+   "columns":[{"key":"arm","label":"Arm"},{"key":"score","kind":"score","digits":3},{"key":"precision","kind":"number","digits":3},
+              {"key":"tokens","kind":"tokens"},{"key":"runs","kind":"number"},{"key":"status","kind":"state"}],
+   "rows":[{"arm":"Specialised agent","score":0.781,"precision":0.82,"tokens":3160000,"runs":1,"status":"active"},
+           {"arm":"Old writer (reference)","score":0.89,"_muted":true,"_unranked":true,"_note":"graded on its own data"}]},
+  {"id":"trend","kind":"chart","chart":"line","half":true,"title":"Score by issue","labels":["3","4","5","6"],"series":[{"name":"Specialised","values":[0.70,0.74,0.76,0.78]}]}]},
+ {"type":"tab_rows","tab":"leaderboard","block":"board","rows":[{"arm":"Specialised agent","score":0.792,"runs":2}]}
+]}
+```
+
+- Blocks: `table` (columns with kind text · number · score (number + bar, best highlighted) · pct · delta · state · tokens; `rank`, `sort`, `row_key`; row flags `_muted`, `_highlight`, `_unranked`, `_note`), `stats` (big numbers), `kv`, `list` (items with state), `text` (paragraphs, `- ` bullets), `chart` (bar · line · hbar).
+- `pin: true` also shows a block on the Overview; `half: true` puts two blocks side by side.
+- Update a single row with `tab_rows` (merges by `row_key`; give only the changed columns). Replace a block with `tab_block`. Read tabs back with `tracker_view` section `tabs`.
+- Tabs are public on share links unless `public: false`. Put results here, not in facts or notes.
+
 ## Automate first: let the server keep it current
 
 Anything a machine can check should be wired once, not posted repeatedly. The

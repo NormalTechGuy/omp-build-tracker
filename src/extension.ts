@@ -11,7 +11,18 @@ import { applyOps, OP_TYPES, type Op } from "./ops";
 import { configureShare, renderStandaloneHtml, TrackerServer, type ShareAction } from "./server";
 import { buildSnapshot } from "./snapshot";
 import { findTrackerDir, newId, nowIso, projectRoot, TrackerStore } from "./store";
-import { FUTURE_STATES, ISSUE_STATUSES, NODE_STATES, POST_KINDS, TEST_RESULTS, WORK_STATES, type AgentRecord, type TodoPhase } from "./types";
+import {
+	BLOCK_KINDS,
+	COLUMN_KINDS,
+	FUTURE_STATES,
+	ISSUE_STATUSES,
+	NODE_STATES,
+	POST_KINDS,
+	TEST_RESULTS,
+	WORK_STATES,
+	type AgentRecord,
+	type TodoPhase,
+} from "./types";
 import { summarize, type ViewSection } from "./view";
 import { CURATOR_ENV, curatorCommand, type CuratorAction } from "./curator";
 
@@ -118,7 +129,7 @@ export default function buildTracker(pi: ExtensionAPI): void {
 		let text = "";
 		if (!state.map.now.items.length) {
 			text =
-				"The tracker has no system map yet. Draw one early with a `map` op: boxes for the components this work builds or changes, containers for groups, edges for the main flows; then add probes and bindings so states keep themselves current.";
+				"The tracker has no system map yet. Draw one early with a `map` op: boxes for the components this work builds or changes, containers for groups, edges for the main flows; then add probes and bindings so states keep themselves current. If this run has its own central output (a leaderboard, a results matrix, a migration checklist, an experiment log), give it a custom tab with a `tab` op and keep it current with `tab_rows`.";
 		} else {
 			const since = state.mapUpdated ?? state.updated;
 			const ageH = (Date.now() - Date.parse(since)) / 3_600_000;
@@ -182,12 +193,14 @@ export default function buildTracker(pi: ExtensionAPI): void {
 		const dir = findTrackerDir(ctx.cwd);
 		store = dir ? new TrackerStore(dir) : undefined;
 		if (!store) return;
-		agentId = ctx.sessionManager.getSessionId();
+		// The curator is a new process each run; one stable id keeps it to one dashboard card.
+		agentId = isCurator ? "curator" : ctx.sessionManager.getSessionId();
 		lastCtx = ctx;
 		isSub = !!ctx.sessionManager.getHeader()?.parentSession || [...liveLeads].some(id => id !== agentId);
 		if (!isSub) liveLeads.add(agentId);
 		const existing = store.readAgent(agentId);
-		store.writeAgent({ ...baseRecord(ctx), ...(existing ?? {}), status: existing?.status === "running" ? "running" : "idle", pid: process.pid, updated: nowIso() });
+		const runs = isCurator ? { runs: (existing?.runs ?? (existing ? 1 : 0)) + 1, started: nowIso(), now: "" } : {};
+		store.writeAgent({ ...baseRecord(ctx), ...(existing ?? {}), ...runs, status: existing?.status === "running" ? "running" : "idle", pid: process.pid, updated: nowIso() });
 		if (!isSub && !isCurator && store.config().autostart) {
 			try {
 				await ensureServer(store, log);
@@ -235,7 +248,8 @@ export default function buildTracker(pi: ExtensionAPI): void {
 			"# Live build tracker",
 			`This project has a live build tracker${url ? ` (${url})` : ""} that the owner watches. Your session already reports status and tool activity automatically, and test/typecheck/lint commands you run in bash are posted as tests for you.`,
 			"Prefer deterministic sources over manual posts: give each box a `probe` (http URL, tcp host:port or shell cmd) and the server checks it on a schedule and sets the box live/blocked by itself; bind boxes to CI workflows (`node` op `ci`) and issue labels (`label`), and areas to milestones (`milestone`) or map containers (`map`). Then post by hand only what no check can see: box state changes, issues you find, blockers, decisions, next steps and estimates. Keep text short and factual.",
-			"Call `tracker_view` first to see map ids. Read skill://build-tracker for conventions.",
+			"If the run has a central result the standard tabs do not show well (a leaderboard, a results matrix, a checklist), keep it in a custom tab (`tab`, then `tab_rows` to update single rows) rather than in facts or notes.",
+			"Call `tracker_view` first to see map ids and custom tabs. Read skill://build-tracker for conventions.",
 			...(stale ? [stale] : []),
 		].join("\n");
 		return { systemPrompt: [...event.systemPrompt, hint] };
@@ -377,6 +391,35 @@ export default function buildTracker(pi: ExtensionAPI): void {
 	});
 	const edge = z.object({ from: s, to: s, kind: opt(s.describe("Key into edge_kinds")), label: opt(s), both: opt(z.boolean()) });
 	const removeFlag = opt(z.boolean().describe("Delete the matching entry"));
+	const tabBlock = z.object({
+		id: opt(s.describe("Block id, lowercase-dashes; needed to update the block later")),
+		kind: opt(z.enum(BLOCK_KINDS).describe("table | stats (big numbers) | kv | list | text | chart")),
+		title: opt(s),
+		note: opt(s.describe("Small text under the block title, e.g. how to read it")),
+		pin: opt(z.boolean().describe("Also show this block on the Overview tab")),
+		half: opt(z.boolean().describe("Half width on wide screens")),
+		columns: opt(
+			z.array(
+				z.object({
+					key: s,
+					label: opt(s),
+					kind: opt(z.enum(COLUMN_KINDS)),
+					digits: opt(z.number()),
+					lower_better: opt(z.boolean()),
+				}),
+			),
+		),
+		rows: opt(z.array(z.record(z.unknown())).describe("Objects keyed by column key; optional _muted, _highlight, _unranked, _note")),
+		row_key: opt(s.describe("Column identifying a row for tab_rows (default: first column)")),
+		sort: opt(s.describe("Column key to sort by")),
+		sort_dir: opt(z.enum(["asc", "desc"])),
+		rank: opt(z.boolean().describe("Add a # column ranked by the sort")),
+		items: opt(z.array(z.object({ label: opt(s), value: opt(z.union([s, z.number()])), sub: opt(s), text: opt(s), state: opt(s) }))),
+		text: opt(s.describe("text block: paragraphs separated by blank lines; lines starting '- ' are bullets")),
+		chart: opt(z.enum(["bar", "line", "hbar"])),
+		labels: opt(z.array(s)),
+		series: opt(z.array(z.object({ name: s, values: z.array(z.number()), color: opt(s) }))),
+	});
 	const op = z.union([
 		z.object({
 			type: z.literal("project"),
@@ -434,6 +477,7 @@ export default function buildTracker(pi: ExtensionAPI): void {
 			next: opt(s.describe("Fail/stopped: what happens next")),
 			lane: opt(s.describe("Work lane / ticket")),
 			where: opt(s.describe("Where it runs")),
+			timeout_h: opt(z.number().describe("Hours a running test may take before it shows as 'no result' (default 3); set it for long runs")),
 		}),
 		z.object({
 			type: z.literal("issue"),
@@ -497,6 +541,30 @@ export default function buildTracker(pi: ExtensionAPI): void {
 			name: opt(s.describe("Display name")),
 			now: opt(s.describe("What you are doing right now")),
 		}),
+		z.object({
+			type: z.literal("tab"),
+			id: s.describe("Tab id, lowercase-dashes, e.g. 'leaderboard'"),
+			title: opt(s.describe("Tab title (required for a new tab)")),
+			note: opt(s.describe("One line under the title, e.g. the question the run answers")),
+			blocks: opt(z.array(tabBlock).describe("Replaces all blocks when given")),
+			public: opt(z.boolean().describe("Show on share links and exports (default true)")),
+			order: opt(z.number()),
+			remove: removeFlag,
+		}),
+		z.object({
+			type: z.literal("tab_block"),
+			tab: s,
+			block: tabBlock.describe("Block to add, or fields to merge into the block with this id"),
+			position: opt(z.number().describe("0-based position for a new block")),
+			remove: removeFlag,
+		}),
+		z.object({
+			type: z.literal("tab_rows"),
+			tab: s,
+			block: s.describe("Table block id"),
+			rows: opt(z.array(z.record(z.unknown())).describe("Rows to add or merge, matched on the block's row_key (default: first column)")),
+			remove_keys: opt(z.array(s)),
+		}),
 	]);
 
 	const noTracker = () => ({
@@ -519,13 +587,14 @@ export default function buildTracker(pi: ExtensionAPI): void {
 			"test: post 'running' when a test starts and pass/fail/stopped with the same name when it ends.",
 			"issue: problem found on a box (open → in progress → fixed). post: decision | blocker | note.",
 			"area/step/phase/estimate/owner_item/fact/chunk: progress areas, critical path, completed phases, estimates, items waiting on the owner, environment facts, work chunks.",
+			"tab / tab_block / tab_rows: a run-specific tab you design from blocks (table, stats, kv, list, text, chart), e.g. a leaderboard; update single rows with tab_rows. Table column kinds: text, number, score (with bar), pct, delta, state, tokens; rows may set _muted, _highlight, _unranked, _note.",
 		].join("\n"),
 		parameters: z.object({ ops: z.array(op).describe("Updates to apply in order") }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const dir = findTrackerDir(ctx.cwd);
 			if (!dir) return noTracker();
 			const st = new TrackerStore(dir);
-			const sessionId = ctx.sessionManager.getSessionId();
+			const sessionId = isCurator ? "curator" : ctx.sessionManager.getSessionId();
 			// Shape enforced by the tool's parameter schema before execute runs.
 			const { ops } = params as { ops: Op[] };
 			const out = applyOps(st, ops, sessionId);
@@ -548,7 +617,7 @@ export default function buildTracker(pi: ExtensionAPI): void {
 		loadMode: findTrackerDir(process.cwd()) ? "essential" : "discoverable",
 		description: "Read the live build tracker: headline, map box ids and states, open issues, tests running and failing, critical path, blockers, agents. Use it before posting to learn ids.",
 		parameters: z.object({
-			section: opt(z.enum(["summary", "map", "tests", "agents", "path", "feeds"]).describe("Default summary covers everything briefly")),
+			section: opt(z.enum(["summary", "map", "tests", "agents", "path", "feeds", "tabs"]).describe("Default summary covers everything briefly; tabs prints custom tab tables in full")),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const dir = findTrackerDir(ctx.cwd);

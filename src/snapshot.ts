@@ -3,7 +3,7 @@
 import * as os from "node:os";
 import { hourBuckets, hourKey, type ForgeData, type GitData, type Merge } from "./collectors";
 import { pidAlive, type TrackerStore } from "./store";
-import type { AgentRecord, Area, CloudflareStatus, HistoryPoint, NodeStatus, Probe, ProbeResult, ShareStatus, Step, TrackerConfig, TrackerEvent, TrackerState } from "./types";
+import type { AgentRecord, Area, CloudflareStatus, CustomTab, HistoryPoint, NodeStatus, Probe, ProbeResult, ShareStatus, Step, TrackerConfig, TrackerEvent, TrackerState } from "./types";
 
 type TestEvent = Extract<TrackerEvent, { type: "test" }>;
 
@@ -14,6 +14,10 @@ export interface SnapshotTest extends Omit<TestEvent, "type" | "result"> {
 
 export interface SnapshotAgent extends AgentRecord {
 	last_min: number | null;
+	/** Minutes since the agent last reported anything. */
+	active_min: number;
+	/** Not checkable by pid and silent for 30+ minutes. */
+	stale?: boolean;
 	todo_done: number;
 	todo_total: number;
 }
@@ -43,6 +47,8 @@ export interface Snapshot {
 	nodes: Record<string, NodeStatus & { auto?: string }>;
 	/** Health checks the server runs, with their latest result. */
 	checks: CheckRow[];
+	/** Run-specific tabs, in display order. */
+	tabs: CustomTab[];
 	tests: SnapshotTest[];
 	testing_now: { node: string; what: string; since: string; lane?: string; where?: string; agent?: string }[];
 	test_notes: TrackerState["testNotes"];
@@ -94,7 +100,7 @@ function resolveTests(events: TestEvent[], nowMs: number, cfg: TrackerConfig["wi
 			const { type: _type, ...rest } = e;
 			if (e.result === "running") {
 				if (later.length) return; // superseded by its outcome or a rerun
-				if (nowMs - Date.parse(e.t) > cfg.noResultHours * 3_600_000) {
+				if (nowMs - Date.parse(e.t) > (e.timeoutHours ?? cfg.noResultHours) * 3_600_000) {
 					tests.push({ ...rest, result: "no result" });
 					return;
 				}
@@ -131,13 +137,21 @@ function buildMilestones(state: TrackerState, forge: ForgeData | undefined, agen
 	return milestones;
 }
 
+/** Minutes without any update after which an agent that cannot be checked by pid shows as stale. */
+const STALE_MINUTES = 30;
+
 function liveAgents(store: TrackerStore, nowMs: number, windowHours: number): SnapshotAgent[] {
 	const host = os.hostname();
-	const out: SnapshotAgent[] = [];
+	let out: SnapshotAgent[] = [];
 	for (const a of store.readAgents()) {
 		if (nowMs - Date.parse(a.updated) > windowHours * 3_600_000) continue;
 		let status = a.status;
-		if (status !== "closed" && a.pid && (a.host ?? host) === host && !pidAlive(a.pid)) status = "closed";
+		const checkable = !!a.pid && (a.host ?? host) === host;
+		if (status !== "closed" && checkable && !pidAlive(a.pid)) status = "closed";
+		const activeMin = Math.max(0, Math.round((nowMs - Date.parse(a.updated)) / 60_000));
+		// Agents outside omp (or on another host) never report "closed"; silence means stale.
+		const stale = status !== "closed" && !checkable && activeMin > STALE_MINUTES;
+		if (stale && status === "running") status = "idle";
 		let done = 0;
 		let total = 0;
 		for (const p of a.todo ?? [])
@@ -149,12 +163,30 @@ function liveAgents(store: TrackerStore, nowMs: number, windowHours: number): Sn
 		out.push({
 			...a,
 			status,
+			...(stale ? { stale: true } : {}),
 			last_min: a.lastPost ? Math.max(0, Math.round((nowMs - Date.parse(a.lastPost)) / 60_000)) : null,
+			active_min: activeMin,
 			todo_done: done,
 			todo_total: total,
 		});
 	}
-	return out;
+	// Older versions recorded each curator run as its own session: show them as one card.
+	const curators = out.filter(a => a.kind === "curator").sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
+	if (curators.length > 1) {
+		const keep = { ...curators[0], runs: curators.reduce((n, c) => n + (c.runs ?? 1), 0) };
+		out = [...out.filter(a => a.kind !== "curator"), keep];
+	}
+	// An agent posting from outside omp under the same name as a real session is the same agent:
+	// keep the most recently updated record of each such name.
+	const byName = new Map<string, SnapshotAgent[]>();
+	for (const a of out) byName.set(a.name, [...(byName.get(a.name) ?? []), a]);
+	const drop = new Set<SnapshotAgent>();
+	for (const group of byName.values()) {
+		if (group.length < 2 || !group.some(a => a.engine === "external")) continue;
+		const newest = group.reduce((m, a) => (Date.parse(a.updated) > Date.parse(m.updated) ? a : m));
+		for (const a of group) if (a !== newest && a.engine === "external") drop.add(a);
+	}
+	return out.filter(a => !drop.has(a));
 }
 
 /** Simple glob: `*` matches anything; patterns are comma separated; case-insensitive. */
@@ -268,6 +300,9 @@ function deriveNodes(state: TrackerState, results: Record<string, ProbeResult>, 
 	return nodes;
 }
 
+/** Progress credit per box state for map-bound areas. */
+const STATE_CREDIT: Record<string, number> = { live: 1, testing: 0.75, building: 0.4, blocked: 0.25, planned: 0 };
+
 /** Areas bound to a milestone or a map container get their % from it. */
 function deriveAreas(state: TrackerState, milestones: Snapshot["milestones"], nodes: Snapshot["nodes"]): Snapshot["areas"] {
 	const kids = new Map<string, string[]>();
@@ -277,27 +312,34 @@ function deriveAreas(state: TrackerState, milestones: Snapshot["milestones"], no
 		return ch ? ch.flatMap(leaves) : [id];
 	};
 	return state.areas.map(a => {
-		let done: number | undefined;
-		let total = 0;
+		let pct: number | undefined;
 		let auto = "";
 		if (a.milestone) {
 			const m = milestones.find(x => x.title.toLowerCase() === a.milestone!.toLowerCase());
-			if (m) {
-				done = m.closed;
-				total = m.open + m.closed;
-				auto = `${m.closed}/${total} closed in "${m.title}"`;
+			if (m && m.open + m.closed) {
+				pct = Math.round((100 * m.closed) / (m.open + m.closed));
+				auto = `${m.closed}/${m.open + m.closed} closed in "${m.title}"`;
 			}
 		} else if (a.map) {
 			const ls = leaves(a.map);
-			done = ls.filter(id => nodes[id]?.state === "live").length;
-			total = ls.length;
-			auto = `${done}/${total} parts live`;
+			if (ls.length) {
+				const states = ls.map(id => nodes[id]?.state ?? "planned");
+				pct = Math.round((100 * states.reduce((s, x) => s + (STATE_CREDIT[x] ?? 0), 0)) / ls.length);
+				const count = (s: string) => states.filter(x => x === s).length;
+				auto = [`${count("live")}/${ls.length} live`, ...(["testing", "building", "blocked"] as const).filter(s => count(s)).map(s => `${count(s)} ${s}`)].join(", ");
+			}
 		}
-		if (done === undefined || !total) return a;
-		const pct = Math.round((100 * done) / total);
+		if (pct === undefined) return a;
 		const st: Snapshot["areas"][number]["state"] = a.state === "blocked" ? "blocked" : pct >= 100 ? "live" : pct > 0 ? "building" : "queued";
 		return { ...a, pct, state: st, note: a.note ? `${a.note} · ${auto}` : auto, auto: true };
 	});
+}
+
+/** Short form of a test or step name for the headline: text before ":" or ", so", at most ~48 chars. */
+function brief(s: string): string {
+	let out = s.split(":")[0].split(/, so |; /)[0].trim();
+	if (out.length > 48) out = `${out.slice(0, 47).replace(/\s+\S*$/, "")}…`;
+	return out;
 }
 
 /** Headline from the data when no one wrote one. */
@@ -308,13 +350,22 @@ function autoHeadline(state: TrackerState, nodes: Snapshot["nodes"], testingNow:
 		const count = (s: string) => items.filter(i => (nodes[i.id]?.state ?? "planned") === s).length;
 		parts.push(`${count("live")} of ${items.length} parts live${count("blocked") ? `, ${count("blocked")} blocked` : ""}${count("testing") ? `, ${count("testing")} testing` : ""}.`);
 	}
-	const failing = tests.filter(t => (t.result === "fail" || t.result === "stopped") && !t.resolved);
-	if (failing.length) parts.push(`Failing: ${failing.slice(0, 3).map(t => t.name).join(", ")}${failing.length > 3 ? ` +${failing.length - 3}` : ""}.`);
+	// Same rule as the dashboard: a failure on a box that is live now is superseded.
+	const failing = [
+		...new Set(tests.filter(t => (t.result === "fail" || t.result === "stopped") && !t.resolved && !(t.node && nodes[t.node]?.state === "live")).map(t => brief(t.name))),
+	];
+	if (failing.length) parts.push(`Failing: ${failing.slice(0, 2).join(", ")}${failing.length > 2 ? ` +${failing.length - 2}` : ""}.`);
 	const active = path.filter(s => s.state === "active" || s.state === "building").map(s => s.step);
-	const now = [...testingNow.map(t => t.what), ...active];
-	if (now.length) parts.push(`Now: ${now.slice(0, 4).join("; ")}.`);
+	const now: string[] = [];
+	for (const x of [...testingNow.map(t => t.what), ...active].map(brief)) {
+		// The same work often appears as a running test and as an active step.
+		const k = x.toLowerCase().slice(0, 14);
+		if (!now.some(y => y.toLowerCase().slice(0, 14) === k)) now.push(x);
+	}
+	if (now.length) parts.push(`Now: ${now.slice(0, 3).join("; ")}${now.length > 3 ? ` +${now.length - 3}` : ""}.`);
 	return parts.join(" ");
 }
+
 export function buildSnapshot(
 	store: TrackerStore,
 	git: GitData | undefined,
@@ -327,12 +378,12 @@ export function buildSnapshot(
 	const lookback = Math.max(cfg.windows.testsHours, cfg.windows.noResultHours, 24, cfg.windows.blockersHours) * 3_600_000;
 	const events = store.readEvents(nowMs - Math.max(lookback, 14 * 86_400_000));
 	const recent = events.filter(e => nowMs - Date.parse(e.t) <= lookback);
-	const testEvents = [
-		...recent.filter((e): e is TestEvent => e.type === "test"),
-		...ciTests(state, forge),
-	].filter(e => nowMs - Date.parse(e.t) <= Math.max(cfg.windows.testsHours, cfg.windows.noResultHours + 1) * 3_600_000);
+	// Running tests may declare a longer timeout (e.g. GPU runs); look back far enough to keep them.
+	const maxTimeout = events.reduce((m, e) => (e.type === "test" && e.timeoutHours ? Math.max(m, e.timeoutHours) : m), 0);
+	const testWindowMs = Math.max(cfg.windows.testsHours, cfg.windows.noResultHours + 1, maxTimeout + 1) * 3_600_000;
+	const testEvents = [...events.filter((e): e is TestEvent => e.type === "test"), ...ciTests(state, forge)].filter(e => nowMs - Date.parse(e.t) <= testWindowMs);
 	const { tests: allTests, testingNow } = resolveTests(testEvents, nowMs, cfg.windows);
-	const tests = allTests.filter(t => nowMs - Date.parse(t.t) <= cfg.windows.testsHours * 3_600_000 || t.result === "no result");
+	const tests = allTests.filter(t => nowMs - Date.parse(t.t) <= cfg.windows.testsHours * 3_600_000 || t.result === "running" || t.result === "no result");
 	const agents = liveAgents(store, nowMs, cfg.windows.agentsHours);
 	const probeResults = store.readProbeResults();
 	const nodes = deriveNodes(state, probeResults, forge, nowMs);
@@ -389,7 +440,17 @@ export function buildSnapshot(
 		const i = hourIdx.get(hourKey(ms));
 		if (i !== undefined) perHour[i][1]++;
 	}
-	const posts = events.filter((e): e is Extract<TrackerEvent, { type: "post" }> => e.type === "post").reverse();
+	// Newest first; an identical post repeated later (same kind and text) shows once, at its latest time.
+	const seenPosts = new Set<string>();
+	const posts = events
+		.filter((e): e is Extract<TrackerEvent, { type: "post" }> => e.type === "post")
+		.reverse()
+		.filter(p => {
+			const k = `${p.kind}\u0000${p.text.replace(/\s+/g, " ").trim().toLowerCase()}`;
+			if (seenPosts.has(k)) return false;
+			seenPosts.add(k);
+			return true;
+		});
 	const strip = (p: Extract<TrackerEvent, { type: "post" }>) => ({ t: p.t, text: p.text, agent: p.agent });
 
 	// Issues: forge if configured, else issues recorded on map nodes.
@@ -438,6 +499,7 @@ export function buildSnapshot(
 		map: state.map,
 		nodes,
 		checks,
+		tabs: [...state.tabs].sort((a, b) => a.order - b.order),
 		tests,
 		testing_now: testingNow,
 		test_notes: state.testNotes,

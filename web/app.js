@@ -69,10 +69,12 @@ function render(){
  $('#mrgsrc').textContent=s.merges?s.merges.source+' · last 48 h, UTC':'last 48 h, UTC';
  if(s.merges){empty('merges','');const mh=s.merges.per_hour;mk('c-merges',{type:'bar',data:{labels:mh.map(x=>x[0].slice(5,10)+' '+x[0].slice(11,13)+'h'),datasets:[{label:'merges',data:mh.map(x=>x[1]),backgroundColor:C.green,borderRadius:2,barPercentage:.85}]},options:{maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:tip},scales:{x:xt(narrow?4:8),y:{beginAtZero:true,ticks:{precision:0,maxTicksLimit:6}}}}})}else empty('merges','No git repository found.');
  $('#agtot').textContent=ag.length+' total';
- const fb={'≤30 min':0,'30–120 min':0,'>2 h or none':0};ag.forEach(a=>{if(a.last_min==null||a.last_min>120)fb['>2 h or none']++;else if(a.last_min>30)fb['30–120 min']++;else fb['≤30 min']++});
- const fbc={'≤30 min':C.green,'30–120 min':C.yellow,'>2 h or none':C.pink};
- $('#agstatus').innerHTML=ag.length?split('Status',cnt(ag,'status'),STATUS)+split('Engine',engines,ENG)+split('Last tracker post',fb,fbc):'<div class="empty">No agents have reported yet.</div>';
- $('#agmix').innerHTML=[split('Engine',engines,ENG),split('Role',cnt(ag,'kind'),{}),split('Last tracker post',fb,fbc)].map(x=>`<div>${x}</div>`).join('');
+ // Freshness counts open agents only, by when they last did anything (finished agents are expected to be quiet).
+ const open=ag.filter(a=>a.status!=='closed'),actMin=a=>a.active_min??(a.updated?Math.round((Date.now()-Date.parse(a.updated))/60000):1e9);
+ const fb={'≤10 min':0,'10–60 min':0,'>1 h':0};open.forEach(a=>{const m=actMin(a);m<=10?fb['≤10 min']++:m<=60?fb['10–60 min']++:fb['>1 h']++});
+ const fbc={'≤10 min':C.green,'10–60 min':C.yellow,'>1 h':C.pink},fbl=`Open agents by last activity (${open.length})`;
+ $('#agstatus').innerHTML=ag.length?split('Status',cnt(ag,'status'),STATUS)+split('Engine',engines,ENG)+split(fbl,fb,fbc):'<div class="empty">No agents have reported yet.</div>';
+ $('#agmix').innerHTML=[split('Engine',engines,ENG),split('Role',cnt(ag,'kind'),{}),split(fbl,fb,fbc)].map(x=>`<div>${x}</div>`).join('');
  // chunks
  const pc=m=>{const t=m.closed+m.open;return t?Math.round(100*m.closed/t):0};
  const ms=[...(s.milestones||[])].sort((a,b)=>pc(b)-pc(a)||(b.closed+b.open)-(a.closed+a.open));$('#chunkbox').style.height=(Math.max(1,ms.length)*24+40)+'px';
@@ -96,7 +98,7 @@ function render(){
  $('#t-owner').innerHTML=(s.owner_items||[]).map(r=>`<div class="li"><span class="k">${esc(r.key==='-'?'—':r.key)}</span><span>${esc(r.text)}</span></div>`).join('')||'<div class="empty">Nothing waiting on you.</div>';
  $('#t-est').innerHTML=(s.estimates||[]).map(r=>`<div class="li"><span>${esc(r.label)}</span><span class="r">${esc(dash(r.when))}</span></div>`).join('')||'<div class="empty">No estimates.</div>';
  $('#footer').innerHTML=`${esc(s.footer?s.footer+' · ':'')}Sources: ${s.sources.map(esc).join(', ')}. ${POLL?'Hosted copy: refreshes every few seconds while the tracker runs.':LIVE?'Live: updates stream as agents post.':'Snapshot taken '+esc(new Date(s.generated_at).toLocaleString())+'.'}${s.public?' Read-only view; secrets redacted.':''}${s.forge_error&&!s.public?' Forge error: '+esc(s.forge_error):''}`;
- renderMap();renderHist();
+ renderTabs();renderMap();renderHist();
 }
 
 function renderTimeline(){const s=S,DAY=86400000,today=new Date();
@@ -116,15 +118,20 @@ function renderTimeline(){const s=S,DAY=86400000,today=new Date();
 function fillSelect(sel,values,allLabel){const el=$(sel),cur=el.value;const opts=[...new Set(values)].filter(Boolean).sort();
  const want=`<option value="">${allLabel}</option>`+opts.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');if(el.dataset.sig!==want){el.innerHTML=want;el.dataset.sig=want;el.value=opts.includes(cur)?cur:''}}
 function renderFilters(){const ag=S.agents||[];fillSelect('#fa-eng',ag.map(a=>a.engine),'All engines');fillSelect('#fa-kind',ag.map(a=>a.kind),'All roles');fillSelect('#fp-a',((S.prs&&S.prs.list)||[]).map(p=>p.author),'All authors')}
-function fresh(a){if(a.last_min==null)return '<span class="stale">no tracker post yet</span>';const m=Math.max(0,a.last_min),c=m>30?'stale':m>10?'warm':'fresh';return `<span class="${c}">posted ${m<1?'just now':m<120?m+' min ago':(m/60).toFixed(1)+' h ago'}</span>`}
+const minAgo=m=>m<1?'just now':m<120?m+' min ago':m<2880?(m/60).toFixed(1)+' h ago':(m/1440).toFixed(1)+' d ago';
+function fresh(a){const m=a.active_min??Math.max(0,Math.round((Date.now()-Date.parse(a.updated))/60000));
+ if(a.status==='closed')return `<span class="note">finished ${minAgo(m)}</span>`;
+ if(a.stale)return `<span class="stale" title="Reports from outside omp and has been silent for over 30 min">silent ${minAgo(m)}</span>`;
+ const c=m>60?'stale':m>10?'warm':'fresh';return `<span class="${c}">active ${minAgo(m)}</span>`}
 function renderAgents(){if(!S)return;const e=$('#fa-eng').value,k=$('#fa-kind').value,st=$('#fa-st').value,q=($('#fa-q').value||'').toLowerCase();
- const order={running:0,idle:1,error:2,closed:3};
+ const order={running:0,idle:1,error:2,closed:3},act=a=>a.active_min??0;
  const rows=(S.agents||[]).filter(a=>(!e||a.engine===e)&&(!k||a.kind===k)&&(!st||a.status===st)&&(!q||[a.name,a.focus,a.last,a.now,a.model,a.thinking,a.action].join(' ').toLowerCase().includes(q)))
-  .sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)||(a.last_min??1e9)-(b.last_min??1e9)||(b.updated<a.updated?-1:1));
+  .sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)||(a.stale?1:0)-(b.stale?1:0)||act(a)-act(b));
  $('#agcount').textContent=rows.length+' of '+(S.agents||[]).length;
  $('#agentgrid').innerHTML=rows.map(a=>{const todo=a.todo_total?`<div class="todo"><div class="bar"><i style="width:${Math.round(100*a.todo_done/a.todo_total)}%;background:${C.green}"></i></div><span>${a.todo_done}/${a.todo_total} todos</span></div>`:'';
   const todoList=(a.todo||[]).map(p=>`<div><span class="lb">${esc(p.name)}</span><ul>${p.tasks.map(t=>`<li class="${t.status==='completed'?'done':esc(t.status)}">${esc(t.content)}</li>`).join('')}</ul></div>`).join('');
-  return `<div class="agent"><div class="h"><b style="color:${colorOf(a.engine,ENG)}">${esc(a.name)}</b><span class="st" style="color:${STATUS[a.status]||C.purple}">${esc(a.status)}</span></div><div class="m">${esc(a.engine)} · <span class="mdl">${esc(a.model||'')}</span>${a.thinking?` · thinking <b class="th th-${esc(a.thinking)}">${esc(a.thinking)}</b>`:''} · ${esc(a.kind)} · ${fresh(a)}</div><div class="now">${a.now?esc(a.now):'<span class="note">No recent update.</span>'}</div>${a.action?`<div class="act" title="${esc(a.action)}">${esc(a.action)}</div>`:''}${todo}<details data-k="ag-${esc(a.id)}"><summary>Focus, last post and todos</summary>${a.focus?`<div><span class="lb">Focus: </span>${esc(a.focus)}</div>`:''}${a.last?`<div><span class="lb">Last post: </span>${esc(a.last)}</div>`:''}<div><span class="lb">Started: </span>${ago(a.started)} · <span class="lb">seen: </span>${ago(a.updated)}</div><div><span class="lb">ID: </span>${esc(a.id)}</div>${todoList}</details></div>`}).join('')||'<div class="empty">No agents match.</div>'}
+  const statusWord=a.stale?'silent':a.status,statusCol=a.stale?C.mute:(STATUS[a.status]||C.purple);
+  return `<div class="agent${a.status==='closed'||a.stale?' dim':''}"><div class="h"><b style="color:${colorOf(a.engine,ENG)}">${esc(a.name)}</b><span class="st" style="color:${statusCol}">${esc(statusWord)}</span></div><div class="m">${esc(a.engine)} · <span class="mdl">${esc(a.model||'')}</span>${a.thinking?` · thinking <b class="th th-${esc(a.thinking)}">${esc(a.thinking)}</b>`:''} · ${esc(a.kind)}${a.runs>1?` · ${a.runs} runs`:''} · ${fresh(a)}</div><div class="now">${a.now?esc(a.now):'<span class="note">No recent update.</span>'}</div>${a.action?`<div class="act" title="${esc(a.action)}">${esc(a.action)}</div>`:''}${todo}<details data-k="ag-${esc(a.id)}"><summary>Focus, last post and todos</summary>${a.focus?`<div><span class="lb">Focus: </span>${esc(a.focus)}</div>`:''}${a.last?`<div><span class="lb">Last post: </span>${esc(a.last)}${a.last_min!=null?` <span class="lb">(${minAgo(a.last_min)})</span>`:''}</div>`:''}<div><span class="lb">Started: </span>${ago(a.started)} · <span class="lb">seen: </span>${ago(a.updated)}</div><div><span class="lb">ID: </span>${esc(a.id)}</div>${todoList}</details></div>`}).join('')||'<div class="empty">No agents match.</div>'}
 
 // ---- PRs ----
 let prSort={k:'n',d:-1};
@@ -203,18 +210,66 @@ function layoutMap(view,width){const d=def(view),kids={},byId={};
  for(const b of bs)place(b,2,2,0);
  return {rects,order,w:width,h:Math.max(60,y-RG+6)}}
 
-// Orthogonal edge routing between two boxes; returns path and label anchor.
-function routeEdge(a,b){const ov=(a1,a2,b1,b2)=>[Math.max(a1,b1),Math.min(a2,b2)];
- const [ox1,ox2]=ov(a.x,a.x+a.w,b.x,b.x+b.w),[oy1,oy2]=ov(a.y,a.y+a.h,b.y,b.y+b.h);
- const ab=a.y+a.h,bb=b.y+b.h,ar=a.x+a.w,br=b.x+b.w;
- // fw/fh: free room next to the label anchor; labels that do not fit become hover titles.
- if(ox2-ox1>12&&b.y>=ab){const x=(ox1+ox2)/2;return {d:`M${x},${ab}V${b.y-2}`,lx:x+5,fw:400,seg:{v:1,x,from:ab,to:b.y}}}
- if(ox2-ox1>12&&a.y>=bb){const x=(ox1+ox2)/2;return {d:`M${x},${a.y}V${bb+2}`,lx:x+5,fw:400,seg:{v:1,x,from:bb,to:a.y}}}
- if(oy2-oy1>10&&b.x>=ar){const y=(oy1+oy2)/2;return {d:`M${ar},${y}H${b.x-2}`,ly:y-4,c:1,fh:40,seg:{h:1,y,from:ar,to:b.x}}}
- if(oy2-oy1>10&&a.x>=br){const y=(oy1+oy2)/2;return {d:`M${a.x},${y}H${br+2}`,ly:y-4,c:1,fh:40,seg:{h:1,y,from:br,to:a.x}}}
- const acx=a.x+a.w/2,acy=a.y+a.h/2,bcx=b.x+b.w/2,bcy=b.y+b.h/2;
- if(b.y>=ab||a.y>=bb){const down=b.y>=ab,sy=down?ab:a.y,ey=down?b.y-2:bb+2,my=(sy+ey)/2;return {d:`M${acx},${sy}V${my}H${bcx}V${ey}`,lx:(acx+bcx)/2,ly:my-4,c:1,fw:Math.abs(bcx-acx)+40,fh:Math.abs(ey-sy)+6}}
- const right=bcx>acx,sx=right?ar:a.x,ex=right?b.x-2:br+2,mx=(sx+ex)/2;return {d:`M${sx},${acy}H${mx}V${bcy}H${ex}`,lx:mx+5,ly:(acy+bcy)/2,fw:Math.abs(ex-sx)/2,fh:60}}
+// Edge routing: orthogonal A* on a 4 px grid. Boxes other than the two ends and the
+// containers holding them are obstacles, so lines run in the gaps between boxes.
+const RG_CELL=4,TURN=6;
+function routeGrid(L){const W=Math.ceil((L.w+12)/RG_CELL),H=Math.ceil((L.h+12)/RG_CELL);return {W,H,used:new Uint8Array(W*H)}}
+function ancestors(L,id){const out=new Set();let p=L.rects[id]&&L.rects[id].it.parent;while(p&&L.rects[p]){out.add(p);p=L.rects[p].it.parent}return out}
+function routeAround(L,G,a,b){
+ const {W,H}=G,blocked=new Uint8Array(W*H),skip=new Set([...ancestors(L,a.id),...ancestors(L,b.id)]);
+ const mark=(r,pad)=>{const x0=Math.max(0,Math.floor((r.x-pad)/RG_CELL)),x1=Math.min(W-1,Math.floor((r.x+r.w+pad)/RG_CELL)),y0=Math.max(0,Math.floor((r.y-pad)/RG_CELL)),y1=Math.min(H-1,Math.floor((r.y+r.h+pad)/RG_CELL));
+  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const cx=x*RG_CELL+2,cy=y*RG_CELL+2;if(cx>r.x-pad&&cx<r.x+r.w+pad&&cy>r.y-pad&&cy<r.y+r.h+pad)blocked[y*W+x]=1}};
+ for(const r of L.order)if(!skip.has(r.id))mark(r,2);
+ // Lines that hug a border read as part of the box: make cells near any border (containers we pass through included) cost more.
+ const near=new Uint8Array(W*H);
+ for(const r of L.order){const band=7,xs=[r.x,r.x+r.w],ys=[r.y,r.y+r.h];
+  for(let y=Math.max(0,Math.floor((r.y-band)/RG_CELL));y<=Math.min(H-1,Math.floor((r.y+r.h+band)/RG_CELL));y++)for(let x=Math.max(0,Math.floor((r.x-band)/RG_CELL));x<=Math.min(W-1,Math.floor((r.x+r.w+band)/RG_CELL));x++){
+   const cx=x*RG_CELL+2,cy=y*RG_CELL+2;if(xs.some(v=>Math.abs(cx-v)<band)||ys.some(v=>Math.abs(cy-v)<band))near[y*W+x]=1}}
+ // Ports: cells just outside each side of a box, middle 70%, with the direction pointing away from (start) or into (goal) the box.
+ const DX=[1,-1,0,0],DY=[0,0,1,-1];// 0 right,1 left,2 down,3 up
+ const ports=(r,into)=>{const out=[],cxs=[],cys=[];const x0=r.x+r.w*.15,x1=r.x+r.w*.85,y0=r.y+r.h*.15,y1=r.y+r.h*.85,mx=r.x+r.w/2,my=r.y+r.h/2;
+  for(let x=Math.ceil(x0/RG_CELL);x*RG_CELL+2<=x1;x++)cxs.push(x);for(let y=Math.ceil(y0/RG_CELL);y*RG_CELL+2<=y1;y++)cys.push(y);
+  const top=Math.floor((r.y-3)/RG_CELL),bot=Math.floor((r.y+r.h+3)/RG_CELL),lef=Math.floor((r.x-3)/RG_CELL),rig=Math.floor((r.x+r.w+3)/RG_CELL);
+  for(const x of cxs){const off=Math.abs(x*RG_CELL+2-mx)/RG_CELL*.3;out.push({x,y:top,d:into?2:3,off,side:'t'},{x,y:bot,d:into?3:2,off,side:'b'})}
+  for(const y of cys){const off=Math.abs(y*RG_CELL+2-my)/RG_CELL*.3;out.push({x:lef,y,d:into?0:1,off,side:'l'},{x:rig,y,d:into?1:0,off,side:'r'})}
+  return out.filter(p=>p.x>=0&&p.y>=0&&p.x<W&&p.y<H&&!blocked[p.y*W+p.x])};
+ const starts=ports(a,false),goals=ports(b,true);if(!starts.length||!goals.length)return null;
+ const goalAt=new Map(goals.map(g=>[g.y*W+g.x,g]));
+ const bx0=b.x/RG_CELL,bx1=(b.x+b.w)/RG_CELL,by0=b.y/RG_CELL,by1=(b.y+b.h)/RG_CELL;
+ const h=(x,y)=>Math.max(0,bx0-x,x-bx1)+Math.max(0,by0-y,y-by1);
+ const N=W*H*4,g=new Float32Array(N).fill(Infinity),prev=new Int32Array(N).fill(-1);
+ // Binary heap of [f, state].
+ const heap=[];const push=(f,s)=>{heap.push([f,s]);let i=heap.length-1;while(i>0){const p=(i-1)>>1;if(heap[p][0]<=heap[i][0])break;[heap[p],heap[i]]=[heap[i],heap[p]];i=p}};
+ const pop=()=>{const top=heap[0],last=heap.pop();if(heap.length){heap[0]=last;let i=0;for(;;){const l=2*i+1,r=l+1;let m=i;if(l<heap.length&&heap[l][0]<heap[m][0])m=l;if(r<heap.length&&heap[r][0]<heap[m][0])m=r;if(m===i)break;[heap[m],heap[i]]=[heap[i],heap[m]];i=m}}return top};
+ for(const s of starts){const st=(s.y*W+s.x)*4+s.d,c=s.off;if(c<g[st]){g[st]=c;push(c+h(s.x,s.y),st)}}
+ let end=-1,steps=0;
+ while(heap.length&&steps++<200000){const [,st]=pop(),cell=st>>2,d=st&3,x=cell%W,y=(cell-x)/W,cost=g[st];
+  const gp=goalAt.get(cell);if(gp&&gp.d===d){end=st;break}
+  for(let nd=0;nd<4;nd++){if((d===0&&nd===1)||(d===1&&nd===0)||(d===2&&nd===3)||(d===3&&nd===2))continue;
+   const nx=x+DX[nd],ny=y+DY[nd];if(nx<0||ny<0||nx>=W||ny>=H)continue;const nc=ny*W+nx;if(blocked[nc]&&!goalAt.has(nc))continue;
+   const c=cost+1+(nd!==d?TURN:0)+(G.used[nc]?3:0)+(near[nc]?1.5:0)+(goalAt.has(nc)?goalAt.get(nc).off:0),ns=nc*4+nd;if(c<g[ns]){g[ns]=c;prev[ns]=st;push(c+h(nx,ny),ns)}}}
+ if(end<0)return null;
+ const cells=[];for(let s=end;s>=0;s=prev[s])cells.push(s>>2);cells.reverse();
+ for(const c of cells)G.used[c]=1;
+ const P=cells.map(c=>[(c%W)*RG_CELL+2,Math.floor(c/W)*RG_CELL+2]);
+ // Snap the ends onto the box borders.
+ const s0=starts.find(s=>s.y*W+s.x===cells[0]),g0=goalAt.get(cells[cells.length-1]);
+ const snap=(p,side,r,gap)=>side==='t'?[p[0],r.y-gap]:side==='b'?[p[0],r.y+r.h+gap]:side==='l'?[r.x-gap,p[1]]:[r.x+r.w+gap,p[1]];
+ P.unshift(snap(P[0],s0.side,a,0));P.push(snap(P[P.length-1],g0.side,b,2));
+ // Collapse to corners.
+ const pts=[P[0]];for(let i=1;i<P.length-1;i++){const [x0,y0]=pts[pts.length-1],[x1,y1]=P[i],[x2,y2]=P[i+1];if(!((x0===x1&&x1===x2)||(y0===y1&&y1===y2)))pts.push(P[i])}pts.push(P[P.length-1]);
+ return {pts,blocked,W,H}}
+function labelSpot(route,text){const {pts,blocked,W,H}=route,w=tw(text,F_SUB)+6;let best=null;
+ for(let i=0;i<pts.length-1;i++){const [x0,y0]=pts[i],[x1,y1]=pts[i+1],len=Math.abs(x1-x0)+Math.abs(y1-y0);
+  const vertical=x0===x1,box=vertical?{x:x0+4,y:(y0+y1)/2-7,w,h:12}:{x:(x0+x1)/2-w/2,y:y0-14,w,h:12};
+  if(vertical?len<18:len<w+8)continue;
+  let free=true;for(let y=Math.floor(box.y/RG_CELL);free&&y<=Math.floor((box.y+box.h)/RG_CELL);y++)for(let x=Math.floor(box.x/RG_CELL);x<=Math.floor((box.x+box.w)/RG_CELL);x++){if(x<0||y<0||x>=W||y>=H||blocked[y*W+x]){free=false;break}}
+  if(free&&(!best||len>best.len))best={len,x:vertical?box.x:(x0+x1)/2,y:vertical?(y0+y1)/2+3.5:y0-4,c:!vertical}}
+ return best}
+// Fallback when no route exists (should not happen with free gaps): a direct elbow.
+function routeEdge(a,b){const acx=a.x+a.w/2,acy=a.y+a.h/2,bcx=b.x+b.w/2,bcy=b.y+b.h/2,ab=a.y+a.h,bb=b.y+b.h;
+ if(b.y>=ab||a.y>=bb){const down=b.y>=ab,sy=down?ab:a.y,ey=down?b.y-2:bb+2,my=(sy+ey)/2;return `M${acx},${sy}V${my}H${bcx}V${ey}`}
+ const right=bcx>acx,sx=right?a.x+a.w:a.x,ex=right?b.x-2:b.x+b.w+2,mx=(sx+ex)/2;return `M${sx},${acy}H${mx}V${bcy}H${ex}`}
 
 function issMark(id,x,y){const n=missues(id).filter(i=>i.status!=='fixed').length;if(!n)return;TNB.push(`<g data-n="${esc(id)}"><title>${n} open issue(s) found in testing</title><circle cx="${x}" cy="${y}" r="8" fill="${C.pink}" stroke="#000" stroke-width="1.5"/><text x="${x}" y="${y+3.4}" text-anchor="middle" font-size="9.5" font-weight="700" fill="#000">!${n>1?n:''}</text></g>`)}
 function tnowMark(id,x,y,w,h,rx){const n=mlive(id).length;if(!n)return '';
@@ -225,15 +280,11 @@ function mbadge(id,cx,cy){const ts=mtests(id);if(!ts.length)return '';const r=ts
 
 function markers(kinds,prefix){return `<defs>${Object.entries(kinds).map(([k,e])=>`<marker id="${prefix}${esc(k)}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0.5L7.5,4L0,7.5z" fill="${palette(e.color)}"/></marker>`).join('')}</defs>`}
 function edgeKinds(view){const d=def(view),k=Object.assign({},d.edgeKinds);for(const e of d.edges)if(!k[e.kind||'_'])k[e.kind||'_']={color:'dim',style:'solid'};return k}
-function edgesSVG(view,L,prefix,withLabels){const d=def(view),kinds=edgeKinds(view),out=[],labels=[];
- for(const e of d.edges){const a=L.rects[e.from],b=L.rects[e.to];if(!a||!b)continue;const k=kinds[e.kind||'_'],col=palette(k.color),r=routeEdge(a,b);
-  // Straight edges: the label goes in the free run from the segment start to the first box edge it crosses.
-  if(r.seg){const s=r.seg;let free=s.to-s.from;
-   for(const o of L.order){const edgeAt=s.v?(o.x<=s.x&&s.x<=o.x+o.w?o.y:null):(o.y<=s.y&&s.y<=o.y+o.h?o.x:null);if(edgeAt!==null&&edgeAt>s.from+1&&edgeAt<s.to)free=Math.min(free,edgeAt-s.from)}
-   if(s.v){r.ly=s.from+free/2+3.5;r.fh=free}else{r.lx=s.from+free/2;r.fw=free}}
-  const fits=e.label&&r.fw>=tw(e.label,F_SUB)+(r.c?6:10)&&r.fh>=13;
-  out.push(`<path d="${r.d}" fill="none" stroke="${col}" stroke-width="1.6" stroke-dasharray="${DASH[k.style]||''}" marker-end="url(#${prefix}${esc(e.kind||'_')})"${e.both?` marker-start="url(#${prefix}${esc(e.kind||'_')})"`:''}>${e.label?`<title>${esc(e.label)}</title>`:''}</path>`);
-  if(withLabels&&fits)labels.push(`<text class="lbl" x="${r.lx}" y="${r.ly}"${r.c?' text-anchor="middle"':''} font-size="9.5" fill="${col}" stroke="#030302" stroke-width="4" paint-order="stroke">${esc(e.label)}</text>`)}
+function edgesSVG(view,L,prefix,withLabels){const d=def(view),kinds=edgeKinds(view),out=[],labels=[],G=routeGrid(L);
+ for(const e of d.edges){const a=L.rects[e.from],b=L.rects[e.to];if(!a||!b)continue;const k=kinds[e.kind||'_'],col=palette(k.color);
+  const r=routeAround(L,G,a,b),dpath=r?'M'+r.pts.map(p=>p.join(',')).join('L'):routeEdge(a,b),spot=r&&e.label?labelSpot(r,e.label):null;
+  out.push(`<path d="${dpath}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round" stroke-dasharray="${DASH[k.style]||''}" marker-end="url(#${prefix}${esc(e.kind||'_')})"${e.both?` marker-start="url(#${prefix}${esc(e.kind||'_')})"`:''}>${e.label?`<title>${esc(e.label)}</title>`:''}</path>`);
+  if(withLabels&&spot)labels.push(`<text class="lbl" x="${spot.x}" y="${spot.y}"${spot.c?' text-anchor="middle"':''} font-size="9.5" fill="${col}" stroke="#030302" stroke-width="4" paint-order="stroke">${esc(e.label)}</text>`)}
  return out.join('')+labels.join('')}
 
 function mapSVG(width,opt){const o=opt||{},L=layoutMap('now',width),out=[],prefix=o.mini?'am-':'ar-';TNB=[];
@@ -314,7 +365,8 @@ function renderMini(){const el=$('#mapmini');const c=mapCounts(),ts=S.tests||[],
  let left;
  if(!items.length)left='<div class="mapempty">No system map yet.</div>';
  else if(narrow)left=split('',c,MST)+`<div class="chips">${lvn.map(k=>`<button class="chip tnc" data-go="${esc(k)}"><span class="tcn">${mlive(k).length}</span><span class="st" style="color:${C.blue}">testing now</span>${esc(mname(k))}</button>`).join('')}${items.filter(i=>['blocked','testing'].includes(mstate(i.id))&&(!isContainer('now',i.id)||hasStatus(i.id))).sort((a,b)=>['blocked','testing'].indexOf(mstate(a.id))-['blocked','testing'].indexOf(mstate(b.id))).map(i=>`<button class="chip" data-go="${esc(i.id)}"><span class="st c-${mstate(i.id)}">${esc(mstate(i.id))}</span>${esc(mname(i.id))}</button>`).join('')}</div><div class="note" style="margin-top:8px">${c.building} parts building, ${c.planned} planned. <a href="#map">Open the map</a> to see them all.</div>`;
- else{const w=Math.max(330,(el.clientWidth||1000)-(window.innerWidth>=1100?384:0)-4);left=`<div class="mapbox">${mapSVG(w,{mini:1})}</div>`}
+ else{// A hidden overview has no width; derive it from <main> so the mini map is not drawn oversized.
+  const avail=el.clientWidth||(($('main').clientWidth||1040)-40);const w=Math.max(330,avail-(window.innerWidth>=1100?384:0)-4);left=`<div class="mapbox">${mapSVG(w,{mini:1})}</div>`}
  const al=S.testing_now||[],tl=$('#tnowlist');tl.innerHTML=al.map(x=>tnowRow(x,true)).join('')||'<div class="empty">Nothing under test</div>';$('#tnowsum').textContent=al.length?`${al.length} active · tap to open on the map`:'';
  el.innerHTML=`<div class="mm"><div>${left}</div><div><div class="sl">Tests now and recent</div><div class="tests">${ts.slice(0,narrow?4:7).map(t=>testRow(t,false)).join('')||`<div class="empty">No test runs posted in the last ${S.windows.testsHours} h.</div>`}</div></div></div>`}
 function selNode(id){SEL=(id&&id!==SEL)?id:null;drawMap();if(SEL&&!isNarrow()){const p=$('#mappanel');if(p&&p.scrollIntoView)p.scrollIntoView({block:'nearest'})}}
@@ -328,14 +380,71 @@ let rsz;window.addEventListener('resize',()=>{clearTimeout(rsz);rsz=setTimeout((
 ['#fa-eng','#fa-kind','#fa-st','#fa-q'].forEach(s=>$(s).addEventListener('input',renderAgents));['#fp-a','#fp-d','#fp-q'].forEach(s=>$(s).addEventListener('input',renderPRs));
 $('#fp-s').addEventListener('input',()=>{const v=($('#fp-s').value||'n:-1').split(':');prSort={k:v[0],d:+v[1]};renderPRs()});
 
+// ---- custom tabs ----
+// Agents design these per run: a list of typed blocks (table, stats, kv, list, text, chart).
+const XSORT={};
+const SERIES_COL=[C.green,C.blue,C.orange,C.purple,C.yellow,C.pink,C.dim];
+const STATE_COL={live:C.green,done:C.green,pass:C.green,ok:C.green,best:C.green,built:C.blue,testing:C.yellow,active:C.yellow,running:C.yellow,building:C.orange,partial:C.orange,queued:C.mute,planned:C.mute,dropped:C.mute,skipped:C.mute,blocked:C.pink,fail:C.pink,failed:C.pink,error:C.pink};
+const fmtNum=(v,d)=>typeof v==='number'?v.toLocaleString(undefined,{minimumFractionDigits:d??0,maximumFractionDigits:d??(Math.abs(v)<10?3:1)}):esc(v);
+const fmtTokens=v=>typeof v!=='number'?esc(v):v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':String(v);
+function textHTML(t){return String(t||'').split(/\n{2,}/).map(p=>{const lines=p.split('\n');if(lines.every(l=>/^\s*[-*] /.test(l)))return `<ul class="xul">${lines.map(l=>`<li>${esc(l.replace(/^\s*[-*] /,''))}</li>`).join('')}</ul>`;return `<p>${lines.map(esc).join('<br>')}</p>`}).join('')}
+function cellHTML(col,v,ctx){if(v===undefined||v===null||v==='')return '<span class="note">–</span>';const k=col.kind||'text';
+ if(k==='number')return `<span class="num">${fmtNum(v,col.digits)}</span>`;
+ if(k==='tokens')return `<span class="num">${fmtTokens(v)}</span>`;
+ if(k==='pct')return typeof v==='number'?`<span class="xsc"><span class="num">${fmtNum(v,col.digits??0)}%</span><i class="xbar"><b style="width:${Math.max(0,Math.min(100,v))}%"></b></i></span>`:esc(v);
+ if(k==='score'){if(typeof v!=='number')return esc(v);const {min,max}=ctx[col.key]||{min:0,max:1},span=max-min||1,best=col.lowerBetter?v===min:v===max;
+  const w=col.lowerBetter?(max-v)/span:(v-Math.min(0,min))/((max-Math.min(0,min))||1);return `<span class="xsc${best?' best':''}"><span class="num">${fmtNum(v,col.digits)}</span><i class="xbar"><b style="width:${Math.max(3,Math.min(100,w*100))}%"></b></i></span>`}
+ if(k==='delta'){if(typeof v!=='number')return esc(v);const good=col.lowerBetter?v<0:v>0;return `<span class="num" style="color:${v===0?C.dim:good?C.green:C.pink}">${v>0?'+':''}${fmtNum(v,col.digits)}</span>`}
+ if(k==='state')return `<span class="st" style="color:${STATE_COL[String(v).toLowerCase()]||C.dim}">${esc(v)}</span>`;
+ return esc(v)}
+function tableHTML(t,b){const cols=b.columns||[],key=`${t.id}/${b.id}`,srt=XSORT[key]||{k:b.sort,d:b.sortDir||(b.sort?'desc':'asc')};
+ let rows=[...(b.rows||[])];
+ if(srt.k){const col=cols.find(c=>c.key===srt.k),dir=srt.d==='asc'?1:-1;rows.sort((x,y)=>{const a=x[srt.k],c=y[srt.k];if(a==null&&c==null)return 0;if(a==null)return 1;if(c==null)return -1;
+  return (typeof a==='number'&&typeof c==='number'?a-c:String(a).localeCompare(String(c),undefined,{numeric:true}))*dir});
+  // Muted / unranked rows (references, dropped arms) stay below the ranked ones.
+  rows.sort((x,y)=>(x._unranked||x._muted?1:0)-(y._unranked||y._muted?1:0));void col}
+ const ctx={};for(const c of cols)if(c.kind==='score'){const vs=rows.filter(r=>!r._unranked&&!r._muted).map(r=>r[c.key]).filter(v=>typeof v==='number');if(vs.length)ctx[c.key]={min:Math.min(...vs),max:Math.max(...vs)}}
+ let rank=0;
+ const head=(b.rank?'<th class="xrk">#</th>':'')+cols.map(c=>`<th data-xs="${esc(key)}" data-k="${esc(c.key)}" class="${['number','score','pct','delta','tokens'].includes(c.kind)?'r':''}">${esc(c.label||c.key)}${srt.k===c.key?(srt.d==='asc'?' ▲':' ▼'):''}</th>`).join('');
+ const body=rows.map(r=>{const unr=r._unranked||r._muted;const rk=b.rank?`<td class="xrk">${unr?'–':++rank}</td>`:'';
+  return `<tr class="${r._muted?'mut':''}${r._highlight?' hi':''}">${rk}${cols.map(c=>`<td class="${['number','score','pct','delta','tokens'].includes(c.kind)?'r':''}">${cellHTML(c,r[c.key],ctx)}</td>`).join('')}</tr>${r._note?`<tr class="xnote${r._muted?' mut':''}"><td colspan="${cols.length+(b.rank?1:0)}">${esc(r._note)}</td></tr>`:''}`}).join('');
+ return `<div class="xtw"><table class="xt"><thead><tr>${head}</tr></thead><tbody>${body||`<tr><td colspan="${cols.length+(b.rank?1:0)}" class="empty">No rows yet.</td></tr>`}</tbody></table></div>`}
+function blockHTML(t,b,opener){let inner='';
+ if(b.kind==='table')inner=tableHTML(t,b);
+ else if(b.kind==='stats')inner=`<div class="xstats">${(b.items||[]).map(i=>`<div class="xstat"><div class="v num"${i.state?` style="color:${STATE_COL[String(i.state).toLowerCase()]||C.fg}"`:''}>${esc(i.value??'–')}</div><div class="l">${esc(i.label||'')}</div>${i.sub?`<div class="d">${esc(i.sub)}</div>`:''}</div>`).join('')}</div>`;
+ else if(b.kind==='kv')inner=`<div class="kv">${(b.items||[]).map(i=>`<b>${esc(i.label||'')}</b><span>${esc(i.value??i.text??'')}${i.sub?` <span class="note">${esc(i.sub)}</span>`:''}</span>`).join('')}</div>`;
+ else if(b.kind==='list')inner=`<div class="xlist">${(b.items||[]).map(i=>`<div class="xli">${i.state?`<span class="st" style="color:${STATE_COL[String(i.state).toLowerCase()]||C.dim}">${esc(i.state)}</span>`:''}<div><div>${esc(i.text??i.label??'')}${i.value!=null?` <b class="num">${esc(i.value)}</b>`:''}</div>${i.sub?`<div class="note">${esc(i.sub)}</div>`:''}</div></div>`).join('')||'<div class="empty">Nothing yet.</div>'}</div>`;
+ else if(b.kind==='text')inner=`<div class="xtext">${textHTML(b.text)}</div>`;
+ else if(b.kind==='chart')inner=`<div class="chartbox${b.chart==='hbar'?' xh':''}" style="${b.chart==='hbar'?`height:${Math.max(120,(b.labels||[]).length*26+40)}px`:''}"><canvas id="xc-${esc(t.id)}-${esc(b.id)}"></canvas></div>`;
+ return `<div class="card${b.half?' half':''}" data-block="${esc(t.id)}/${esc(b.id)}">${b.title?`<h2><span>${opener||''}${esc(b.title)}</span><small>${b.kind==='table'?`${(b.rows||[]).length} rows · `:''}updated ${ago(b.updated)}</small></h2>`:''}${b.note?`<div class="note xbn">${esc(b.note)}</div>`:''}${inner}</div>`}
+function drawCharts(t,blocks,suffix){for(const b of blocks){if(b.kind!=='chart')continue;const id=`xc-${t.id}-${b.id}${suffix}`;const el=document.getElementById(id);if(!el)continue;
+ const type=b.chart==='line'?'line':'bar',series=b.series||[];
+ mk(id,{type,data:{labels:b.labels||[],datasets:series.map((s,i)=>{const col=s.color?palette(s.color):SERIES_COL[i%SERIES_COL.length];return {label:s.name,data:s.values,backgroundColor:type==='line'?col+'22':col,borderColor:col,borderWidth:type==='line'?2:0,borderRadius:2,fill:type==='line'&&series.length===1,tension:.25,pointRadius:type==='line'?2:0,spanGaps:true}})},
+  options:{indexAxis:b.chart==='hbar'?'y':'x',maintainAspectRatio:false,plugins:{legend:{display:series.length>1,position:'top',align:'end'},tooltip:tip},scales:{x:{grid:{display:b.chart==='hbar'},ticks:{autoSkip:true,maxRotation:0}},y:{grid:{display:b.chart!=='hbar'},beginAtZero:true,ticks:{autoSkip:false}}}}})}}
+function renderTabs(){const tabs=S.tabs||[];
+ const sig=tabs.map(t=>t.id+':'+t.title).join('|');
+ if($('#navx').dataset.sig!==sig){$('#navx').dataset.sig=sig;$('#navx').innerHTML=tabs.map(t=>`<a href="#x-${esc(t.id)}">${esc(t.title)}</a>`).join('');
+  $('#xviews').innerHTML=tabs.map(t=>`<section class="view" id="v-x-${esc(t.id)}"></section>`).join('');route()}
+ for(const t of tabs){const sec=document.getElementById('v-x-'+t.id);if(!sec)continue;
+  // Charts keep their canvas across renders; rebuild only the non-chart blocks' HTML when the structure is unchanged.
+  sec.innerHTML=`${t.note?`<div class="xhead">${esc(t.note)}</div>`:''}<div class="xgrid">${t.blocks.map(b=>blockHTML(t,b)).join('')||'<div class="card"><div class="empty">This tab has no blocks yet.</div></div>'}</div>`;
+  drawCharts(t,t.blocks,'')}
+ const pins=tabs.flatMap(t=>t.blocks.filter(b=>b.pin).map(b=>({t,b})));
+ $('#pinned').innerHTML=pins.map(({t,b})=>blockHTML(t,{...b,title:b.title||t.title},`<a class="xopen" href="#x-${esc(t.id)}">${esc(t.title)} ›</a> `).replace(/id="xc-([^"]+)"/,'id="xc-$1-pin"')).join('');
+ for(const {t,b} of pins)drawCharts(t,[b],'-pin');
+ // Table header clicks sort; state is kept per block across live updates.
+ document.querySelectorAll('th[data-xs]').forEach(th=>th.onclick=()=>{const key=th.dataset.xs,k=th.dataset.k,cur=XSORT[key]||{};XSORT[key]={k,d:cur.k===k&&cur.d==='desc'?'asc':'desc'};renderTabs()})}
+
 // ---- routing ----
 const views=['overview','map','path','chunks','agents','prs','activity','feeds','infra','owner'];
-function route(){const sp=new URLSearchParams(location.search||''),qs=sp.get('tab'),hp=(location.hash||'').slice(1).split('/'),hv=hp[0],v=views.includes(hv)?hv:views.includes(qs)?qs:'overview';
+const allViews=()=>[...views,...((S&&S.tabs)||[]).map(t=>'x-'+t.id)];
+function route(){const sp=new URLSearchParams(location.search||''),qs=sp.get('tab'),hp=(location.hash||'').slice(1).split('/'),hv=hp[0],vs=allViews(),v=vs.includes(hv)?hv:vs.includes(qs)?qs:'overview';
  if(v==='map'){const fut=views.includes(hv)?hp[1]==='future':sp.get('view')==='future';MAPVIEW=fut?'future':'now';
   if(fut){const f=hp[2]||sp.get('node');FSEL=f||null}else{const nd=hp[1]||sp.get('node');SEL=nd?decodeURIComponent(nd):null}}
- views.forEach(x=>$('#v-'+x).classList.toggle('act',x===v));
+ vs.forEach(x=>{const el=document.getElementById('v-'+x);if(el)el.classList.toggle('act',x===v)});
  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('act',a.getAttribute('href')==='#'+v));centerTab();
  if(S&&v==='map')drawMap();
+ if(S&&v==='overview')renderMini();
  Object.values(charts).forEach(c=>c.resize&&c.resize())}
 function centerTab(){const n=$('#nav'),a=n&&n.querySelector('a.act');if(a&&n.clientWidth)n.scrollLeft=Math.max(0,a.offsetLeft-n.offsetLeft-(n.clientWidth-a.offsetWidth)/2)}
 window.addEventListener('hashchange',route);window.addEventListener('load',centerTab);window.addEventListener('resize',centerTab);
